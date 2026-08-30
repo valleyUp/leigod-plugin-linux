@@ -29,7 +29,7 @@
 - IPv6 在加速命名空间中关闭，避免不受支持的 IPv6 流量绕过 IPv4 TUN。
 - 自动更新监控不在镜像中运行；升级通过重新校验、构建镜像完成。
 
-更完整的审计、信任边界和残余风险见 [docs/SECURITY.md](docs/SECURITY.md)。当前宿主安装内容、仓库内构建边界、完整构建与使用流程见 [docs/IMPLEMENTATION_REVIEW.md](docs/IMPLEMENTATION_REVIEW.md)。
+实际部署请先阅读 [docs/USAGE.md](docs/USAGE.md)，其中分别给出 macvlan/bridge 配置、手机发现、Lutris 使用、脚本调用链和故障定位。更完整的审计、信任边界和残余风险见 [docs/SECURITY.md](docs/SECURITY.md)；宿主安装内容与仓库内构建边界见 [docs/IMPLEMENTATION_REVIEW.md](docs/IMPLEMENTATION_REVIEW.md)。
 
 ## 系统要求
 

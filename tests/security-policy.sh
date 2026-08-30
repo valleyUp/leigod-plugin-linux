@@ -14,6 +14,10 @@ fail() {
     exit 1
 }
 
+[ -r "$REPO_DIR/docs/USAGE.md" ] || fail 'operator usage guide is missing'
+grep -q 'docs/USAGE.md' "$REPO_DIR/README.md" ||
+    fail 'README does not link the operator usage guide'
+
 for script in \
     install.sh \
     uninstall.sh \
@@ -169,6 +173,7 @@ for required_archive_path in \
     "$archive_root/systemd/leigod-discover-proxy.service" \
     "$archive_root/docker/healthcheck.sh" \
     "$archive_root/docker/log-forwarder.sh" \
+    "$archive_root/docs/USAGE.md" \
     "$archive_root/libexec/install-manifest.sh"; do
     grep -Fxq "$required_archive_path" "$WORK_DIR/source-archive.list" ||
         fail "source package is missing: $required_archive_path"
