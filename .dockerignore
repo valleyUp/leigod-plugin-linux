@@ -1,0 +1,14 @@
+.git
+.agents
+.codex
+.leigod
+.leigod-build.*
+.leigod-test.*
+packages/.leigod-source.*
+debian
+docs
+packages
+systemd
+tests
+*.deb
+*.tar.gz

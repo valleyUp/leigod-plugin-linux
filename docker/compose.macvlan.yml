@@ -1,0 +1,17 @@
+services:
+  accelerator:
+    networks:
+      leigod-macvlan:
+        ipv4_address: ${LEIGOD_IPV4:?set LEIGOD_IPV4}
+        mac_address: ${LEIGOD_DEVICE_MAC:?set LEIGOD_DEVICE_MAC}
+
+networks:
+  leigod-macvlan:
+    name: leigod-plugin-macvlan
+    driver: macvlan
+    driver_opts:
+      parent: ${LEIGOD_PARENT:?set LEIGOD_PARENT}
+    ipam:
+      config:
+        - subnet: ${LEIGOD_SUBNET:?set LEIGOD_SUBNET}
+          gateway: ${LEIGOD_GATEWAY:?set LEIGOD_GATEWAY}

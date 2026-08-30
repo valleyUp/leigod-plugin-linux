@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = -- ]; then
+    shift
+fi
+if [ "$#" -eq 0 ]; then
+    printf 'usage: leigod-game-run -- COMMAND [ARG ...]\n' >&2
+    exit 2
+fi
+
+uid=$(id -u)
+runtime_dir="/run/user/$uid"
+if [ ! -d "$runtime_dir" ] || [ ! -O "$runtime_dir" ]; then
+    printf 'leigod-game-run: trusted runtime directory %s is unavailable\n' "$runtime_dir" >&2
+    exit 1
+fi
+
+umask 077
+env_file=$(mktemp "$runtime_dir/leigod-env.XXXXXX")
+cleanup() {
+    rm -f -- "$env_file"
+}
+trap cleanup EXIT HUP INT TERM
+
+env -0 > "$env_file"
+
+if sudo -n /usr/local/libexec/leigod-game-enter "$env_file" -- "$@"; then
+    status=0
+else
+    status=$?
+    printf '%s\n' \
+        'leigod-game-run: launch failed; verify container health and leigod-game group membership' >&2
+    exit "$status"
+fi
+
+exit "$status"

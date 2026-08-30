@@ -1,0 +1,56 @@
+name: leigod-plugin
+
+services:
+  accelerator:
+    image: leigod-plugin:${LEIGOD_VERSION:-1.2.2.15}
+    container_name: leigod-plugin
+    init: true
+    restart: unless-stopped
+    privileged: false
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun:rwm
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 2.0
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=128m
+      - /run:rw,nosuid,nodev,noexec,size=8m
+      - /var/lib/leigod:rw,nosuid,nodev,noexec,size=128m
+    volumes:
+      - ./opt/leigod/fake_product_name:/sys/class/dmi/id/product_name:ro
+      - type: volume
+        source: leigod-state
+        target: /var/lib/leigod/config
+        volume:
+          nocopy: true
+    environment:
+      LEIGOD_DEVICE_MAC: ${LEIGOD_DEVICE_MAC:?set LEIGOD_DEVICE_MAC}
+      LEIGOD_DEBUG: ${LEIGOD_DEBUG:-0}
+      LEIGOD_LOG_LEVEL: ${LEIGOD_LOG_LEVEL:-warn}
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+      net.ipv6.conf.default.disable_ipv6: "1"
+    healthcheck:
+      test: ["CMD", "/usr/local/sbin/leigod-healthcheck"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 20s
+    stop_grace_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  leigod-state:
+    name: leigod-plugin-state

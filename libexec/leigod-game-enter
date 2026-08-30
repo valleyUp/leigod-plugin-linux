@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+HOME=/root
+USER=root
+LOGNAME=root
+LANG=C
+LC_ALL=C
+export PATH HOME USER LOGNAME LANG LC_ALL
+unset BASH_ENV CDPATH DOCKER_API_VERSION DOCKER_CERT_PATH DOCKER_CONFIG \
+    DOCKER_CONTEXT DOCKER_CLI_HINTS DOCKER_CLI_PLUGIN_EXTRA_DIRS DOCKER_TLS_VERIFY \
+    ENV GCONV_PATH IFS LD_AUDIT LD_DEBUG LD_LIBRARY_PATH LD_PRELOAD LD_PROFILE \
+    PERL5OPT PYTHONPATH RUBYOPT XDG_CONFIG_HOME
+export DOCKER_HOST=unix:///var/run/docker.sock
+
+fail() {
+    printf 'leigod-game-enter: %s\n' "$*" >&2
+    exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || fail 'must be invoked through sudo'
+
+uid=${SUDO_UID:-}
+gid=${SUDO_GID:-}
+case "$uid" in
+    ''|*[!0-9]*|0) fail 'invalid sudo caller UID' ;;
+esac
+case "$gid" in
+    ''|*[!0-9]*) fail 'invalid sudo caller GID' ;;
+esac
+
+env_file=${1:-}
+[ -n "$env_file" ] || fail 'missing environment file'
+shift
+[ "${1:-}" = -- ] || fail 'missing argument separator'
+shift
+[ "$#" -gt 0 ] || fail 'missing game command'
+
+case "$env_file" in
+    "/run/user/$uid/"leigod-env.*) ;;
+    *) fail 'environment file is outside the caller runtime directory' ;;
+esac
+
+if [ -x /usr/bin/docker ]; then
+    docker_bin=/usr/bin/docker
+elif [ -x /usr/local/bin/docker ]; then
+    docker_bin=/usr/local/bin/docker
+else
+    fail 'Docker CLI is unavailable'
+fi
+
+container_state=$(
+    "$docker_bin" inspect \
+        --format '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.State.Pid}} {{.HostConfig.Privileged}} {{.HostConfig.NetworkMode}} {{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}} {{index .Config.Labels "com.docker.compose.project"}}' \
+        leigod-plugin 2>/dev/null
+) || fail 'accelerator container is unavailable'
+
+set -- $container_state "$@"
+running=$1
+health=$2
+container_pid=$3
+privileged=$4
+network_mode=$5
+cap_add=$6
+cap_drop=$7
+compose_project=$8
+shift 8
+
+[ "$running" = true ] || fail 'accelerator container is not running'
+[ "$health" = healthy ] || fail "accelerator container health is $health"
+[ "$privileged" = false ] || fail 'refusing a privileged accelerator container'
+case "$network_mode" in
+    leigod-plugin-macvlan|leigod-plugin-bridge) ;;
+    *) fail "refusing unexpected container network mode: $network_mode" ;;
+esac
+case "$cap_add" in
+    '["NET_ADMIN","NET_RAW"]'|'["NET_RAW","NET_ADMIN"]'|\
+    '["CAP_NET_ADMIN","CAP_NET_RAW"]'|'["CAP_NET_RAW","CAP_NET_ADMIN"]') ;;
+    *) fail "refusing unexpected container capabilities: $cap_add" ;;
+esac
+[ "$cap_drop" = '["ALL"]' ] || fail "container did not drop all capabilities: $cap_drop"
+[ "$compose_project" = leigod-plugin ] || fail 'container is not owned by the leigod-plugin project'
+case "$container_pid" in
+    ''|*[!0-9]*) fail 'Docker returned an invalid container PID' ;;
+esac
+[ "$container_pid" -gt 1 ] || fail 'Docker returned an unsafe container PID'
+[ -r "/proc/$container_pid/ns/net" ] || fail 'container network namespace disappeared'
+
+exec /usr/local/libexec/leigod-netns-exec \
+    "$container_pid" "$uid" "$gid" "$env_file" -- "$@"

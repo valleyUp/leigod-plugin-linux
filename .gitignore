@@ -3,6 +3,7 @@ acc-gw.router.*
 ipdatacloud_country.xdb
 
 # Build artifacts
+bin/leigod-discover-proxy
 packages/*.deb
 packages/*.tar.gz
 *.deb
@@ -11,6 +12,10 @@ packages/*.tar.gz
 # Temp files
 /tmp/
 /tmp/acc/
+.leigod/
+.leigod-build.*/
+.leigod-test.*/
+packages/.leigod-source.*/
 
 # Editor backups
 *~

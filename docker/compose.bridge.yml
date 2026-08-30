@@ -1,0 +1,17 @@
+services:
+  accelerator:
+    ports:
+      - "${LEIGOD_BIND_ADDRESS:-127.0.0.1}:5588:5588/tcp"
+    networks:
+      leigod-bridge:
+        ipv4_address: ${LEIGOD_BRIDGE_IPV4:-172.21.0.2}
+        mac_address: ${LEIGOD_DEVICE_MAC:?set LEIGOD_DEVICE_MAC}
+
+networks:
+  leigod-bridge:
+    name: leigod-plugin-bridge
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${LEIGOD_BRIDGE_SUBNET:-172.21.0.0/16}
+          gateway: ${LEIGOD_BRIDGE_GATEWAY:-172.21.0.1}
