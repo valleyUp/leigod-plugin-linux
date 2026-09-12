@@ -7,6 +7,36 @@ services:
         ipv4_address: ${LEIGOD_BRIDGE_IPV4:-172.21.0.2}
         mac_address: ${LEIGOD_DEVICE_MAC:?set LEIGOD_DEVICE_MAC}
 
+  # Host network is required to receive LAN UDP broadcasts and learn the
+  # advertised address via IP_PKTINFO. Do not publish 6066 through docker-proxy.
+  discover-proxy:
+    image: leigod-discover-proxy:${LEIGOD_VERSION:-1.2.2.15}
+    container_name: leigod-discover-proxy
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    privileged: false
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 16
+    mem_limit: 32m
+    command:
+      - --bind
+      - ${LEIGOD_BIND_ADDRESS:-127.0.0.1}
+      - --container
+      - ${LEIGOD_BRIDGE_IPV4:-172.21.0.2}
+    depends_on:
+      - accelerator
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 networks:
   leigod-bridge:
     name: leigod-plugin-bridge

@@ -34,7 +34,7 @@
 
 macvlan 是默认值，因为容器能用独立 LAN 身份与网关通信，无需 host network，局域网发现也无需暴露宿主全部端口。安装器要求明确提供保留 IP，以免自行猜测并撞上 DHCP 租约。
 
-无线网络常限制额外源 MAC。bridge 是显式回退：仍保留相同 namespace 边界，只发布 Web/API 的 5588/TCP；默认 bind 到 loopback。局域网发现由宿主上的 `leigod-discover-proxy` 监听 6066/UDP（DynamicUser、无额外 capability），只做 NBOX 探测转发并把通告 IP 改写成宿主地址。程序的 10001/TCP 调试端口不发布。两种配置都没有 `privileged`、host PID/IPC、host network 或 Docker socket。
+无线网络常限制额外源 MAC。bridge 是显式回退：加速容器仍保留相同 namespace 边界，只发布 Web/API 的 5588/TCP；默认 bind 到 loopback。局域网发现由 `leigod-discover-proxy` sidecar 监听 6066/UDP（`network_mode: host`、非 root、`cap_drop: ALL`、只读根文件系统），只做 NBOX 探测转发并把通告 IP 改写成宿主地址。6066 不经 docker-proxy 发布。程序的 10001/TCP 调试端口不发布。两种配置都没有 `privileged`、host PID/IPC 或 Docker socket。host network 仅用于该开源 sidecar，不用于闭源加速容器。
 
 ## 资产完整性
 
@@ -51,6 +51,7 @@ macvlan 是默认值，因为容器能用独立 LAN 身份与网关通信，无�
 - namespace helper 依赖容器 PID 在 Docker inspect 与 `setns` 之间保持有效。helper 会重新打开该 PID 的 namespace 并失败关闭，但极端 PID 重用竞态无法仅靠 shell 完全消除。
 - 关闭 IPv6 避免绕过，但可能使只支持 IPv6 的游戏/网络不可用。
 - Docker 日志转发会脱敏已知 token、nonce、user ID、授权头、密码和加速会话标识，并限制磁盘轮转；这不是对闭源日志格式的完整信息流证明。`info/debug` 仍可能记录游戏域名、IP 或未知敏感字段，日志读取权限和导出文件应按敏感数据管理。
+- bridge 发现代理 sidecar 与宿主共用网络命名空间，因此能绑定宿主端口并收发局域网 UDP。它是小型开源程序，以非 root、无 capability、只读根文件系统运行，但不能提供比「宿主上的同等网络进程」更强的网络隔离。
 
 ## 安全不变量回归
 
@@ -60,6 +61,6 @@ macvlan 是默认值，因为容器能用独立 LAN 身份与网关通信，无�
 ./tests/security-policy.sh
 ```
 
-该检查会编译 C helper、检查所有 shell 语法、解析 macvlan/bridge 的 Compose 最终配置，并拒绝 privileged、host network、Docker socket、额外 capability 或宿主网络管理命令重新进入安装路径。
+该检查会编译 C helper、检查所有 shell 语法、解析 macvlan/bridge 的 Compose 最终配置，并拒绝 privileged、Docker socket、额外 capability 或宿主网络管理命令重新进入安装路径。host network 只允许出现在 bridge 发现代理 sidecar。
 
 容器健康检查要求 TUN 设备、daemon 进程、Web 控制进程以及 `5588/TCP` 监听同时存在，避免 Web 子进程崩溃时仅凭 daemon PID 继续报告 healthy。

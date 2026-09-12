@@ -19,7 +19,7 @@
 
 安全边界：
 
-- Compose 明确设置 `privileged: false`，从不使用 `network_mode: host`。
+- Compose 明确设置 `privileged: false`。加速容器从不使用 `network_mode: host`；bridge 模式下仅开源发现代理 sidecar 使用 host network，以便接收局域网 UDP 广播。
 - 容器先丢弃全部 capability，再只加入 `NET_ADMIN`、`NET_RAW`；只映射 `/dev/net/tun`。
 - 根文件系统只读，并启用 `no-new-privileges`、PID/内存/CPU 上限和默认 seccomp。
 - Steam Deck DMI 文件只读挂载；容器没有 Docker socket，也没有宿主目录写挂载。
@@ -57,6 +57,36 @@ sha256sum opt/leigod/acc-gw.router.amd64 \
 ```
 
 如果本地文件不存在，安装器可以从旧版官方 HTTP 地址下载，但默认要求对应的预期哈希。`--allow-unverified-download` 是显式、不推荐的兼容开关；安装器会显示实际哈希，不能把它视为独立完整性证明。
+
+## 构建容器
+
+```bash
+docker build --pull --build-arg LEIGOD_VERSION=1.2.2.15 \
+  -f docker/Dockerfile -t leigod-plugin:1.2.2.15 .
+
+# 仅 bridge 模式需要发现代理
+docker build --pull \
+  -f docker/Dockerfile.discover-proxy \
+  -t leigod-discover-proxy:1.2.2.15 .
+```
+
+## 启动容器
+
+运行配置在 `.leigod/docker.env`（完整安装由 `install.sh` 生成；也可从 `config/docker.env.example` 复制后按本机修改）。
+
+macvlan：
+
+```bash
+docker compose --env-file .leigod/docker.env --project-directory . \
+  -f docker/compose.yml -f docker/compose.macvlan.yml up -d
+```
+
+bridge（同时启动加速容器和 host-network 发现代理）：
+
+```bash
+docker compose --env-file .leigod/docker.env --project-directory . \
+  -f docker/compose.yml -f docker/compose.bridge.yml up -d
+```
 
 ## 安装：macvlan（首选）
 
@@ -96,9 +126,9 @@ sudo ./install.sh \
   --xdb-sha256 <64位SHA-256>
 ```
 
-bridge 仍是独立网络命名空间，并不使用 host network。默认只把 Web/API 的 `5588/TCP` 映射到 `127.0.0.1`。手机 App 需要从同一 Wi-Fi 发现并识别为 Steam Deck 时，须显式加 `--bind-address 0.0.0.0`，并用宿主防火墙允许可信局域网访问 `5588/TCP` 和 `6066/UDP`。
+加速容器仍使用独立网络命名空间，并不使用 host network。默认只把 Web/API 的 `5588/TCP` 映射到 `127.0.0.1`。手机 App 需要从同一 Wi-Fi 发现并识别为 Steam Deck 时，须显式加 `--bind-address 0.0.0.0`，并用宿主防火墙允许可信局域网访问 `5588/TCP` 和 `6066/UDP`。
 
-闭源程序在容器里通告的是 Docker 网桥地址，手机连不上。因此 bridge 模式会在宿主安装 `leigod-discover-proxy`：接收局域网 `<NBOX> HELLO` 广播/单播，转给容器，并把应答里的 `ip=` 改写成宿主局域网地址。容器本身仍不使用 host network。`10001/TCP` 是程序标明的调试端口，不对外发布。
+闭源程序在容器里通告的是 Docker 网桥地址，手机连不上。因此 bridge 模式会启动 `leigod-discover-proxy` sidecar（host network、非 root、无额外 capability）：接收局域网 `<NBOX> HELLO` 广播/单播，转给加速容器，并把应答里的 `ip=` 改写成宿主局域网地址。6066/UDP 不经 docker-proxy 发布。`10001/TCP` 是程序标明的调试端口，不对外发布。
 
 安装完成后注销并重新登录一次，使 `leigod-game` 组成员身份生效。
 
@@ -120,7 +150,7 @@ leigod-game-run -- wine /path/to/game.exe
 
 ## 验证
 
-确认容器没有 privileged/host network，并查看能力和网络驱动：
+确认加速容器没有 privileged/host network，并查看能力和网络驱动：
 
 ```bash
 docker inspect leigod-plugin --format \
@@ -192,7 +222,7 @@ tests/           静态安全策略回归
 opt/leigod/      伪装文件、配置模板和本地官方资产位置
 ```
 
-旧版宿主 systemd 服务和 Debian 维护脚本已移除，避免绕过 Docker 隔离重新操作宿主网络。通用源码包可用 `packages/build-tar.sh` 构建；包内保留 bridge 发现代理所需的受限 systemd 模板，但不包含第三方二进制。安装仍需在目标机器上提供/校验官方资产并配置网络。
+通用源码包可用 `packages/build-tar.sh` 构建；包内包含 bridge 发现代理镜像构建文件，但不包含第三方二进制。安装仍需在目标机器上提供/校验官方资产并配置网络。
 
 ## 免责声明
 

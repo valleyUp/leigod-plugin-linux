@@ -37,7 +37,7 @@ while [ "$#" -gt 0 ]; do
         -h|--help)
             printf 'usage: sudo ./uninstall.sh [--purge] [--purge-state]\n'
             printf '%s\n' \
-                '--purge removes the locally built Docker image.' \
+                '--purge removes the locally built Docker images.' \
                 '--purge-state removes the phone binding state volume after label verification.'
             exit 0
             ;;
@@ -82,6 +82,14 @@ elif [ -n "$DOCKER" ]; then
     if [ "$project" = leigod-plugin ]; then
         info 'removing the orphaned accelerator container'
         "$DOCKER" rm -f leigod-plugin >/dev/null
+    fi
+    proxy_project=$(
+        "$DOCKER" inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' \
+            leigod-discover-proxy 2>/dev/null || true
+    )
+    if [ "$proxy_project" = leigod-plugin ]; then
+        info 'removing the orphaned discovery proxy container'
+        "$DOCKER" rm -f leigod-discover-proxy >/dev/null
     fi
 fi
 
@@ -134,33 +142,6 @@ remove_managed_file() {
     return 1
 }
 
-unit=/etc/systemd/system/leigod-discover-proxy.service
-unit_retained=0
-if [ -e "$unit" ] || [ -L "$unit" ]; then
-    if [ "$manifest_available" -eq 1 ] &&
-       leigod_manifest_file_matches "$INSTALL_MANIFEST" "$unit"; then
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl disable --now leigod-discover-proxy.service >/dev/null 2>&1 || true
-        fi
-        rm -f -- "$unit"
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl daemon-reload >/dev/null 2>&1 || true
-        fi
-    else
-        warn "managed file is modified or cannot be verified and was retained: $unit"
-        retained_managed_files=1
-        unit_retained=1
-    fi
-fi
-
-if [ "$unit_retained" -eq 0 ]; then
-    remove_managed_file /usr/local/libexec/leigod-discover-proxy || true
-elif [ -e /usr/local/libexec/leigod-discover-proxy ] ||
-     [ -L /usr/local/libexec/leigod-discover-proxy ]; then
-    warn 'discovery proxy was retained because its systemd unit was retained'
-    retained_managed_files=1
-fi
-
 if [ "$manifest_available" -eq 1 ]; then
     remove_managed_file /usr/bin/leigod-game-run || true
 else
@@ -192,10 +173,11 @@ else
 fi
 
 if [ "$purge" -eq 1 ] && [ -n "$DOCKER" ]; then
-    info 'purging the locally built image'
+    info 'purging the locally built images'
     "$DOCKER" image rm "leigod-plugin:$VERSION" >/dev/null 2>&1 || true
+    "$DOCKER" image rm "leigod-discover-proxy:$VERSION" >/dev/null 2>&1 || true
 else
-    info 'the locally built Docker image was retained; use --purge to remove it'
+    info 'the locally built Docker images were retained; use --purge to remove them'
 fi
 
 info 'uninstalled; downloaded vendor assets and the leigod-game group were retained'

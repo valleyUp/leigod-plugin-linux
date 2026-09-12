@@ -1,0 +1,17 @@
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/leigod-discover-proxy.c /src/leigod-discover-proxy.c
+RUN cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+        -fstack-protector-strong -static -s -Wl,-z,relro,-z,now \
+        -o /leigod-discover-proxy /src/leigod-discover-proxy.c \
+    && /leigod-discover-proxy --self-test
+
+FROM scratch
+
+COPY --from=build /leigod-discover-proxy /leigod-discover-proxy
+USER 65534:65534
+ENTRYPOINT ["/leigod-discover-proxy"]

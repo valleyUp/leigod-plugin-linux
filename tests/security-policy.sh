@@ -59,19 +59,52 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-discover-proxy" "$REPO_DIR/src/leigod-discover-proxy.c"
 "$WORK_DIR/leigod-discover-proxy" --self-test || fail 'discovery proxy self-test failed'
-grep -q 'DynamicUser=yes' "$REPO_DIR/systemd/leigod-discover-proxy.service" ||
-    fail 'discovery proxy unit must use DynamicUser'
-if grep -E 'network_mode:[[:space:]]*host|privileged:[[:space:]]*true' \
-    "$REPO_DIR/systemd/leigod-discover-proxy.service" >/dev/null; then
-    fail 'discovery proxy unit must not use host network or privileged'
+[ ! -e "$REPO_DIR/systemd/leigod-discover-proxy.service" ] ||
+    fail 'host systemd discovery proxy unit still exists'
+grep -q 'network_mode: host' "$REPO_DIR/docker/compose.bridge.yml" ||
+    fail 'bridge discovery proxy must use host network'
+grep -q 'user: "65534:65534"' "$REPO_DIR/docker/compose.bridge.yml" ||
+    fail 'bridge discovery proxy must run as 65534:65534'
+grep -q 'privileged: false' "$REPO_DIR/docker/compose.bridge.yml" ||
+    fail 'bridge discovery proxy must explicitly disable privileged mode'
+grep -A20 '^  discover-proxy:' "$REPO_DIR/docker/compose.bridge.yml" |
+    grep -q 'cap_drop:' || fail 'bridge discovery proxy must drop capabilities'
+if grep -A40 '^  discover-proxy:' "$REPO_DIR/docker/compose.bridge.yml" |
+    grep -q 'cap_add:'; then
+    fail 'bridge discovery proxy must not add capabilities'
+fi
+grep -q 'FROM scratch' "$REPO_DIR/docker/Dockerfile.discover-proxy" ||
+    fail 'discovery proxy image is not built from scratch'
+grep -q 'USER 65534:65534' "$REPO_DIR/docker/Dockerfile.discover-proxy" ||
+    fail 'discovery proxy image does not set the non-root user'
+grep -q -- '--self-test' "$REPO_DIR/docker/Dockerfile.discover-proxy" ||
+    fail 'discovery proxy image does not run the C self-test'
+grep -q -- '-static' "$REPO_DIR/docker/Dockerfile.discover-proxy" ||
+    fail 'discovery proxy binary is not statically linked'
+grep -q 'Dockerfile.discover-proxy' "$REPO_DIR/install.sh" ||
+    fail 'installer does not build the discovery proxy image'
+grep -q 'Dockerfile.discover-proxy' "$REPO_DIR/README.md" ||
+    fail 'README does not document building the discovery proxy image'
+grep -q 'compose.bridge.yml up -d' "$REPO_DIR/README.md" ||
+    fail 'README does not document starting the bridge compose project'
+[ ! -e "$REPO_DIR/bin/leigod-discover-proxy" ] ||
+    fail 'precompiled discovery proxy binary still exists'
+if grep -E 'leigod-discover-proxy\.service|/usr/local/libexec/leigod-discover-proxy' \
+    "$REPO_DIR/install.sh" "$REPO_DIR/uninstall.sh" >/dev/null; then
+    fail 'installer or uninstaller still manages a host discovery proxy'
 fi
 
 grep -q 'privileged: false' "$REPO_DIR/docker/compose.yml" ||
     fail 'Compose must explicitly disable privileged mode'
-if grep -R -E 'network_mode:[[:space:]]*host|privileged:[[:space:]]*true|pid:[[:space:]]*host|ipc:[[:space:]]*host' \
+if grep -R -E 'privileged:[[:space:]]*true|pid:[[:space:]]*host|ipc:[[:space:]]*host' \
     "$REPO_DIR/docker" >/dev/null; then
     fail 'forbidden host namespace or privileged setting found'
 fi
+host_network_files=$(
+    grep -R -l -E 'network_mode:[[:space:]]*host' "$REPO_DIR/docker" || true
+)
+[ "$host_network_files" = "$REPO_DIR/docker/compose.bridge.yml" ] ||
+    fail 'host network is only allowed for the bridge discovery proxy'
 if grep -R -F '/var/run/docker.sock' "$REPO_DIR/docker" >/dev/null; then
     fail 'Docker socket must not be mounted into the container'
 fi
@@ -135,6 +168,8 @@ fi
 
 [ ! -e "$REPO_DIR/systemd/leigod_plugin.service" ] ||
     fail 'legacy host-network systemd service still exists'
+[ ! -e "$REPO_DIR/systemd/leigod-discover-proxy.service" ] ||
+    fail 'legacy host discovery proxy systemd unit still exists'
 [ ! -e "$REPO_DIR/debian/postinst" ] ||
     fail 'legacy Debian host-network installer still exists'
 if grep -E '/opt/leigod-plugin|/etc/leigod-plugin|/usr/local/bin/leigod-game-run|\.local/bin/leigod-game-run' \
@@ -170,7 +205,7 @@ LEIGOD_SOURCE_OUTPUT=$source_archive sh "$REPO_DIR/packages/build-tar.sh" >/dev/
 archive_root=leigod-plugin-1.2.2.15
 tar -tzf "$source_archive" > "$WORK_DIR/source-archive.list"
 for required_archive_path in \
-    "$archive_root/systemd/leigod-discover-proxy.service" \
+    "$archive_root/docker/Dockerfile.discover-proxy" \
     "$archive_root/docker/healthcheck.sh" \
     "$archive_root/docker/log-forwarder.sh" \
     "$archive_root/docs/USAGE.md" \
@@ -178,6 +213,10 @@ for required_archive_path in \
     grep -Fxq "$required_archive_path" "$WORK_DIR/source-archive.list" ||
         fail "source package is missing: $required_archive_path"
 done
+if grep -Fxq "$archive_root/systemd/leigod-discover-proxy.service" \
+    "$WORK_DIR/source-archive.list"; then
+    fail 'source package still contains the host discovery proxy systemd unit'
+fi
 if grep -Fxq "$archive_root/bin/leigod-discover-proxy" "$WORK_DIR/source-archive.list"; then
     fail 'source package contains the local precompiled discovery proxy'
 fi
@@ -207,7 +246,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
         grep -q 'NET_ADMIN' "$rendered" || fail "NET_ADMIN missing from $rendered"
         grep -q 'NET_RAW' "$rendered" || fail "NET_RAW missing from $rendered"
         grep -q 'source: /dev/net/tun' "$rendered" || fail "TUN missing from $rendered"
-        if grep -E 'network_mode:[[:space:]]*host|privileged:[[:space:]]*true' "$rendered" >/dev/null; then
+        if grep -E 'privileged:[[:space:]]*true' "$rendered" >/dev/null; then
             fail "unsafe rendered Compose config: $rendered"
         fi
         grep -q 'source: leigod-state' "$rendered" ||
@@ -229,11 +268,66 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
     grep -q 'ipv4_address: 172.21.0.2' "$WORK_DIR/bridge.yml" ||
         fail 'bridge container IP is not pinned'
     if grep -E 'target: 6066' "$WORK_DIR/bridge.yml" >/dev/null; then
-        fail 'bridge discovery UDP must be owned by the host proxy, not Docker publish'
+        fail 'bridge discovery UDP must be owned by the host-network proxy, not Docker publish'
     fi
     if grep -A5 'target: 10001' "$WORK_DIR/bridge.yml" >/dev/null; then
         fail 'debug port must not be published'
     fi
+    python3 - "$WORK_DIR/macvlan.yml" "$WORK_DIR/bridge.yml" <<'PY'
+import sys
+
+def service_blocks(path):
+    blocks = {}
+    current = None
+    in_services = False
+    with open(path, encoding='utf-8') as handle:
+        for line in handle:
+            if not in_services:
+                if line.startswith('services:'):
+                    in_services = True
+                continue
+            if line and not line[0].isspace():
+                break
+            if line.startswith('  ') and not line.startswith('    ') and line.strip().endswith(':'):
+                current = line.strip()[:-1]
+                blocks[current] = []
+                continue
+            if current is not None:
+                blocks[current].append(line)
+    return {name: ''.join(body) for name, body in blocks.items()}
+
+def fail(message):
+    raise SystemExit(message)
+
+macvlan = service_blocks(sys.argv[1])
+bridge = service_blocks(sys.argv[2])
+if 'discover-proxy' in macvlan:
+    fail('macvlan compose must not start the discovery proxy')
+if 'network_mode:' in macvlan.get('accelerator', '') and 'host' in macvlan.get('accelerator', ''):
+    fail('accelerator must not use host network in macvlan mode')
+if 'discover-proxy' not in bridge:
+    fail('bridge compose is missing the discovery proxy service')
+accelerator = bridge['accelerator']
+proxy = bridge['discover-proxy']
+if 'network_mode:' in accelerator and 'host' in accelerator:
+    fail('accelerator must not use host network in bridge mode')
+if 'network_mode:' not in proxy or 'host' not in proxy:
+    fail('bridge discovery proxy must use host network')
+if 'privileged: true' in proxy:
+    fail('bridge discovery proxy must not be privileged')
+if '65534:65534' not in proxy:
+    fail('bridge discovery proxy must run as 65534:65534')
+if 'read_only: true' not in proxy:
+    fail('bridge discovery proxy root filesystem is not read-only')
+if 'no-new-privileges:true' not in proxy and 'no-new-privileges: true' not in proxy:
+    fail('bridge discovery proxy must set no-new-privileges')
+if 'NET_ADMIN' in proxy or 'NET_RAW' in proxy:
+    fail('bridge discovery proxy must not receive NET_ADMIN or NET_RAW')
+if 'docker.sock' in proxy:
+    fail('bridge discovery proxy must not mount the Docker socket')
+if 'target: 6066' in proxy:
+    fail('bridge discovery UDP must not be published through docker-proxy')
+PY
 fi
 
 sh "$REPO_DIR/tests/discover-proxy.sh"

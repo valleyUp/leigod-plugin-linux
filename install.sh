@@ -121,9 +121,12 @@ if [ -n "$existing_project" ] && [ "$existing_project" != leigod-plugin ]; then
     fail "container name $CONTAINER_NAME is already used outside this project"
 fi
 
-if command -v systemctl >/dev/null 2>&1 &&
-   systemctl is-active --quiet leigod_plugin.service 2>/dev/null; then
-    fail 'the legacy host-network service is active; uninstall it before installing the isolated version'
+existing_proxy_project=$(
+    "$DOCKER" inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' \
+        leigod-discover-proxy 2>/dev/null || true
+)
+if [ -n "$existing_proxy_project" ] && [ "$existing_proxy_project" != leigod-plugin ]; then
+    fail 'container name leigod-discover-proxy is already used outside this project'
 fi
 
 case "$network_mode" in
@@ -315,15 +318,16 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$work_dir/leigod-netns-exec" "$SCRIPT_DIR/src/leigod-netns-exec.c"
 
-info 'building the LAN discovery proxy'
-cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
-    -fstack-protector-strong -Wl,-z,relro,-z,now \
-    -o "$work_dir/leigod-discover-proxy" "$SCRIPT_DIR/src/leigod-discover-proxy.c"
-"$work_dir/leigod-discover-proxy" --self-test >/dev/null
-
 info "building leigod-plugin:$VERSION"
 "$DOCKER" build --pull --build-arg "LEIGOD_VERSION=$VERSION" \
     -f "$SCRIPT_DIR/docker/Dockerfile" -t "leigod-plugin:$VERSION" "$SCRIPT_DIR"
+
+if [ "$network_mode" = bridge ]; then
+    info "building leigod-discover-proxy:$VERSION"
+    "$DOCKER" build --pull \
+        -f "$SCRIPT_DIR/docker/Dockerfile.discover-proxy" \
+        -t "leigod-discover-proxy:$VERSION" "$SCRIPT_DIR"
+fi
 
 if [ "$network_mode" = macvlan ]; then
     compose_override=$SCRIPT_DIR/docker/compose.macvlan.yml
@@ -339,7 +343,7 @@ if [ "$network_mode" = bridge ]; then
     "$DOCKER" network rm leigod-plugin-bridge >/dev/null 2>&1 || true
 fi
 "$DOCKER" compose --env-file "$CONFIG_FILE" --project-directory "$SCRIPT_DIR" \
-    -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" up -d
+    -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" up -d --remove-orphans
 
 health=starting
 attempt=0
@@ -352,6 +356,46 @@ while [ "$attempt" -lt 20 ]; do
     sleep 2
 done
 [ "$health" = healthy ] || fail "container health is $health; inspect: docker logs $CONTAINER_NAME"
+
+if [ "$network_mode" = bridge ]; then
+    assigned_ip=$("$DOCKER" inspect --format \
+        '{{(index .NetworkSettings.Networks "leigod-plugin-bridge").IPAddress}}' \
+        "$CONTAINER_NAME")
+    [ "$assigned_ip" = "$bridge_ipv4" ] ||
+        fail "bridge container IP is $assigned_ip, expected $bridge_ipv4"
+
+    proxy_running=false
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        proxy_running=$("$DOCKER" inspect --format '{{.State.Running}}' \
+            leigod-discover-proxy 2>/dev/null || true)
+        [ "$proxy_running" = true ] && break
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    [ "$proxy_running" = true ] ||
+        fail 'discovery proxy container is not running; inspect: docker logs leigod-discover-proxy'
+
+    proxy_net=$("$DOCKER" inspect --format '{{.HostConfig.NetworkMode}}' leigod-discover-proxy)
+    proxy_priv=$("$DOCKER" inspect --format '{{.HostConfig.Privileged}}' leigod-discover-proxy)
+    proxy_caps=$("$DOCKER" inspect --format '{{json .HostConfig.CapAdd}}' leigod-discover-proxy)
+    proxy_drop=$("$DOCKER" inspect --format '{{json .HostConfig.CapDrop}}' leigod-discover-proxy)
+    proxy_user=$("$DOCKER" inspect --format '{{.Config.User}}' leigod-discover-proxy)
+    [ "$proxy_net" = host ] ||
+        fail "discovery proxy network is $proxy_net, expected host"
+    [ "$proxy_priv" = false ] || fail 'discovery proxy container must not be privileged'
+    case "$proxy_caps" in
+        null|'[]') ;;
+        *) fail "discovery proxy has unexpected capabilities: $proxy_caps" ;;
+    esac
+    [ "$proxy_drop" = '["ALL"]' ] ||
+        fail "discovery proxy did not drop all capabilities: $proxy_drop"
+    case "$proxy_user" in
+        65534|65534:65534) ;;
+        *) fail "discovery proxy user is $proxy_user, expected 65534:65534" ;;
+    esac
+    info "LAN discovery proxy listens on $bind_address:6066 and advertises that LAN address"
+fi
 
 info 'installing the restricted per-game launcher'
 install -d -m 0755 /usr/local/libexec
@@ -367,70 +411,6 @@ info "authorized desktop user: $target_user"
 visudo -cf "$SCRIPT_DIR/sudoers/leigod-game" >/dev/null || fail 'sudoers rule is invalid'
 install -m 0440 "$SCRIPT_DIR/sudoers/leigod-game" /etc/sudoers.d/leigod-game
 
-remove_previous_managed_file() {
-    managed_target=$1
-    if [ ! -e "$managed_target" ] && [ ! -L "$managed_target" ]; then
-        return 0
-    fi
-    if leigod_manifest_file_matches "$INSTALL_MANIFEST" "$managed_target"; then
-        rm -f -- "$managed_target"
-        return 0
-    fi
-    warn "retaining unverified or modified file: $managed_target"
-    return 1
-}
-
-remove_discover_proxy() {
-    unit=/etc/systemd/system/leigod-discover-proxy.service
-    unit_retained=0
-    if [ -e "$unit" ] || [ -L "$unit" ]; then
-        if leigod_manifest_file_matches "$INSTALL_MANIFEST" "$unit"; then
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl disable --now leigod-discover-proxy.service >/dev/null 2>&1 || true
-            fi
-            rm -f -- "$unit"
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl daemon-reload >/dev/null 2>&1 || true
-            fi
-        else
-            warn "retaining unverified or modified file: $unit"
-            unit_retained=1
-        fi
-    fi
-    if [ "$unit_retained" -eq 0 ]; then
-        remove_previous_managed_file /usr/local/libexec/leigod-discover-proxy || true
-    elif [ -e /usr/local/libexec/leigod-discover-proxy ]; then
-        warn 'retaining discovery proxy because its systemd unit was retained'
-    fi
-}
-
-discover_proxy_installed=0
-discover_unit_installed=0
-install_discover_proxy() {
-    assigned_ip=$("$DOCKER" inspect --format \
-        '{{(index .NetworkSettings.Networks "leigod-plugin-bridge").IPAddress}}' \
-        "$CONTAINER_NAME")
-    [ "$assigned_ip" = "$bridge_ipv4" ] ||
-        fail "bridge container IP is $assigned_ip, expected $bridge_ipv4"
-    install -m 0755 "$work_dir/leigod-discover-proxy" /usr/local/libexec/leigod-discover-proxy
-    discover_proxy_installed=1
-    if ! command -v systemctl >/dev/null 2>&1; then
-        warn 'systemd is unavailable; start /usr/local/libexec/leigod-discover-proxy manually'
-        return 0
-    fi
-    unit=/etc/systemd/system/leigod-discover-proxy.service
-    sed -e "s/@BIND_ADDRESS@/$bind_address/g" -e "s/@CONTAINER_IP@/$bridge_ipv4/g" \
-        "$SCRIPT_DIR/systemd/leigod-discover-proxy.service" > "$work_dir/leigod-discover-proxy.service"
-    install -m 0644 "$work_dir/leigod-discover-proxy.service" "$unit"
-    discover_unit_installed=1
-}
-
-if [ "$network_mode" = bridge ]; then
-    install_discover_proxy
-else
-    remove_discover_proxy
-fi
-
 manifest_tmp=$work_dir/install-manifest
 printf '%s\n' '# leigod-plugin install manifest v1' > "$manifest_tmp"
 for managed_target in \
@@ -441,21 +421,7 @@ for managed_target in \
     leigod_manifest_record_file "$manifest_tmp" "$managed_target" ||
         fail "cannot record installed file in manifest: $managed_target"
 done
-if [ "$discover_proxy_installed" -eq 1 ]; then
-    leigod_manifest_record_file "$manifest_tmp" /usr/local/libexec/leigod-discover-proxy ||
-        fail 'cannot record the discovery proxy in the install manifest'
-fi
-if [ "$discover_unit_installed" -eq 1 ]; then
-    leigod_manifest_record_file "$manifest_tmp" /etc/systemd/system/leigod-discover-proxy.service ||
-        fail 'cannot record the discovery unit in the install manifest'
-fi
 install -m 0600 "$manifest_tmp" "$INSTALL_MANIFEST"
-
-if [ "$discover_unit_installed" -eq 1 ]; then
-    systemctl daemon-reload
-    systemctl enable --now leigod-discover-proxy.service
-    info "LAN discovery proxy listens on $bind_address:6066 and advertises that LAN address"
-fi
 
 info 'installation complete'
 printf '%s\n' \

@@ -38,13 +38,13 @@ sudo env LEIGOD_DEVICE_MAC=02:11:22:33:44:55 \
 |---|---|---|
 | 适用环境 | 有线网卡，交换机/AP 允许额外 MAC | Wi-Fi、额外 MAC 被拒绝，或希望使用 Docker NAT |
 | LAN 身份 | 容器直接拥有独立 LAN MAC 和静态 IP | 容器使用 Docker 私网地址，默认 `172.21.0.2` |
-| 手机发现 | 手机直接发现容器 | 宿主 UDP 6066 代理发现报文并改写通告 IP |
+| 手机发现 | 手机直接发现容器 | host-network 发现代理容器改写通告 IP |
 | Web/API 5588 | 容器直接在其 LAN IP 监听 | Docker 发布到宿主 `--bind-address` |
 | 宿主到容器 | macvlan 默认不能从 parent 宿主直接访问 | 可通过发布的 5588/TCP 访问 |
 | 必须准备 | parent、LAN 子网/网关、DHCP 池外静态 IP | 手机发现时须设置 LAN bind，并自行放行 5588/TCP、6066/UDP |
 | 常见失败 | Wi-Fi/AP 不允许一个客户端使用多个 MAC | 防火墙、AP 客户端隔离、Docker 私网与 VPN/现有网段冲突 |
 
-两种模式都使用独立 network namespace，都不使用 `privileged` 或 `network_mode: host`。只有通过 `/usr/bin/leigod-game-run` 启动的游戏进程进入该 namespace；Lutris 主界面和宿主其他程序仍使用普通网络。
+两种模式的加速容器都使用独立 network namespace，都不使用 `privileged`。加速容器本身不使用 `network_mode: host`；只有 bridge 的开源发现代理 sidecar 使用 host network，以便接收局域网 UDP 广播。只有通过 `/usr/bin/leigod-game-run` 启动的游戏进程进入加速 namespace；Lutris 主界面和宿主其他程序仍使用普通网络。
 
 ## 3. 共同前置条件
 
@@ -166,7 +166,7 @@ sudo ./install.sh \
 
 - 创建 Docker 网络 `leigod-plugin-macvlan`。
 - 容器使用预留的 LAN IP 和稳定 MAC，直接与网关及手机通信。
-- 不安装 bridge 发现代理；若以前使用 bridge，只会在安装清单能验证旧文件未被修改时移除旧代理。
+- 不启动发现代理 sidecar；若当前 Compose 项目里还有该容器，`--remove-orphans` 会去掉它。
 - 不发布 Docker host port。
 - 同一 parent 上的宿主默认不能直接访问 macvlan 容器，这是 macvlan 的正常隔离行为；游戏通过 `setns` 进入容器网络，不依赖宿主访问容器 IP。
 
@@ -203,12 +203,12 @@ sudo ./install.sh \
 
 本地资产已准备、暂时不做哈希验证时可以省略两个哈希参数；资产缺失且仍要下载时添加 `--allow-unverified-download`。
 
-`0.0.0.0` 会让 5588/TCP 和发现代理的 6066/UDP 在所有 IPv4 接口监听。安装器不会修改宿主防火墙；应只允许可信 LAN 源网段访问：
+`0.0.0.0` 会让 5588/TCP 和发现代理的 6066/UDP 在所有 IPv4 接口监听。发现代理与宿主共用网络命名空间，但不把 6066 交给 docker-proxy 发布。安装器不会修改宿主防火墙；应只允许可信 LAN 源网段访问：
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | 5588 | TCP | 手机 App 与闭源 Web/API 进程通信 |
-| 6066 | UDP | 手机发现请求，由宿主发现代理接收 |
+| 6066 | UDP | 手机发现请求，由 host-network 发现代理容器接收 |
 
 不要向公网端口转发这两个端口。不同发行版使用 nftables、firewalld 或 ufw，具体规则应按本机现有防火墙管理方式添加，并限制来源为可信 LAN。
 
@@ -241,9 +241,9 @@ sudo env \
 
 ### 5.3 bridge 发现代理如何工作
 
-闭源程序在容器内会把 Docker 私网 IP 写入发现应答，手机无法直接连接该地址。因此 bridge 安装会现场编译并安装 `/usr/local/libexec/leigod-discover-proxy`，再通过 systemd 启动：
+闭源程序在容器内会把 Docker 私网 IP 写入发现应答，手机无法直接连接该地址。因此 bridge 安装会构建 `leigod-discover-proxy` 镜像并启动 sidecar（`network_mode: host`）：
 
-1. 宿主进程在 `--bind-address:6066/UDP` 等待手机广播或单播。
+1. sidecar 与宿主共用网络命名空间，在 `--bind-address:6066/UDP` 等待手机广播或单播。
 2. 它取得接收报文的宿主本地 IPv4；使用 `0.0.0.0` 时依靠 `IP_PKTINFO` 区分实际收到报文的接口地址。
 3. 它把最多 2048 字节的请求转发到固定 bridge 容器 IP 的 6066/UDP。
 4. 最多等待 400 ms 获取容器应答。
@@ -252,7 +252,7 @@ sudo env \
 
 因此，源码自测里的示例 MAC 不可能替换实际发现应答中的 MAC。代理只改 `ip=`。
 
-systemd 单元使用 `DynamicUser`、`NoNewPrivileges`、只读系统保护、私有临时目录/设备、地址族限制和资源上限。它是宿主上的受限网络进程；雷神闭源二进制仍只在容器内，容器本身仍不使用 host network。
+该 sidecar 使用 `cap_drop: ALL`、只读根文件系统、`no-new-privileges`、非 root `65534:65534`，以及 32M 内存 / 16 PID 上限。6066/UDP 不经 docker-proxy 发布。雷神闭源二进制仍只在加速容器内，加速容器本身仍不使用 host network。安装器不再把发现代理写入 `/usr` 或 `/etc/systemd`。
 
 ### 5.4 验证 bridge
 
@@ -260,12 +260,13 @@ systemd 单元使用 `DynamicUser`、`NoNewPrivileges`、只读系统保护、�
 docker inspect leigod-plugin --format \
   'health={{.State.Health.Status}} privileged={{.HostConfig.Privileged}} network={{.HostConfig.NetworkMode}} caps={{json .HostConfig.CapAdd}}'
 docker network inspect leigod-plugin-bridge --format 'driver={{.Driver}}'
-systemctl status leigod-discover-proxy.service
+docker inspect leigod-discover-proxy --format \
+  'running={{.State.Running}} network={{.HostConfig.NetworkMode}} privileged={{.HostConfig.Privileged}} user={{.Config.User}}'
 docker logs --tail 100 leigod-plugin
-journalctl -u leigod-discover-proxy.service --since today
+docker logs --tail 50 leigod-discover-proxy
 ```
 
-预期容器为 `healthy`，网络名是 `leigod-plugin-bridge`，发现代理为 `active (running)`。
+预期加速容器为 `healthy`，网络名是 `leigod-plugin-bridge`；发现代理为 `running`、`network=host`、`privileged=false`、`user=65534:65534`。
 
 可从宿主 loopback 验证改写流程，同时避免打印完整序列号：
 
@@ -288,7 +289,7 @@ print("model=%s bound=%s ip=%s" %
 PY
 ```
 
-手机仍发现不到时依次检查：容器健康、安装参数是否为 `--bind-address 0.0.0.0`、代理 service、宿主 6066/UDP 与 5588/TCP 防火墙、手机与宿主是否处于同一 LAN，以及 AP 是否开启客户端隔离。
+手机仍发现不到时依次检查：容器健康、安装参数是否为 `--bind-address 0.0.0.0`、发现代理容器、宿主 6066/UDP 与 5588/TCP 防火墙、手机与宿主是否处于同一 LAN，以及 AP 是否开启客户端隔离。
 
 ## 6. 手机绑定与 Lutris 使用
 
@@ -397,17 +398,15 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 安装器需要 root，但不会直接修改宿主默认路由、全局 iptables/nftables 或 `/etc/resolv.conf`：
 
 1. 解析参数，检查 root、x86_64、TUN、Docker/Compose 和宿主工具。
-2. 拒绝占用同名容器的其他 Compose 项目，以及仍在运行的旧 host-network service。
+2. 拒绝占用同名容器的其他 Compose 项目。
 3. 验证网络、日志级别、桌面用户和 MAC；macvlan 自动检测部分 LAN 参数，但强制要求静态 `--ip`。
 4. 准备第三方资产：本地文件优先；有预期哈希时强制匹配；无文件、无哈希时只有显式不安全开关才能下载。
 5. 在仓库内创建 `.leigod/docker.env`（`0600`），记录网络、稳定 MAC、用户、日志级别和 wrapper 哈希。账号绑定 token 不写在这里。
-6. 在仓库内随机 `.leigod-build.*` 临时目录编译 namespace helper 和发现代理，并运行代理自测。
-7. 以当前仓库为唯一 build context 构建 `leigod-plugin:1.2.2.15`。
-8. 选择相应 Compose override 启动容器，并最多等待约 40 秒成为 healthy。
+6. 在仓库内随机 `.leigod-build.*` 临时目录编译 namespace helper。
+7. 以当前仓库为唯一 build context 构建 `leigod-plugin:1.2.2.15`；bridge 再构建 `leigod-discover-proxy:1.2.2.15`。
+8. 选择相应 Compose override 启动容器，并最多等待约 40 秒成为 healthy。bridge 还会确认发现代理容器为 running、host network、非 privileged。
 9. 容器健康后才安装 launcher/helper、创建 `leigod-game` 组、追加桌面用户并校验/安装 sudoers。
-10. bridge 模式安装发现代理和 systemd 单元；macvlan 模式安全移除由旧清单验证的代理文件。
-11. 对固定系统文件计算 SHA-256，保存到 `.leigod/install-manifest`（`0600`）。
-12. bridge 单元在清单写好之后才 `enable --now`，最后删除临时构建目录。
+10. 对固定系统文件计算 SHA-256，保存到 `.leigod/install-manifest`（`0600`），最后删除临时构建目录。
 
 安装会写入的系统位置仅包括：
 
@@ -416,8 +415,6 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 /usr/local/libexec/leigod-game-enter
 /usr/local/libexec/leigod-netns-exec
 /etc/sudoers.d/leigod-game
-/usr/local/libexec/leigod-discover-proxy                 # bridge
-/etc/systemd/system/leigod-discover-proxy.service       # bridge + systemd
 ```
 
 ## 10. 日常管理、更新与模式切换
@@ -433,8 +430,9 @@ docker logs -f --tail 100 leigod-plugin
 bridge 额外查看：
 
 ```bash
-systemctl status leigod-discover-proxy.service
-journalctl -u leigod-discover-proxy.service -n 100
+docker inspect leigod-discover-proxy --format \
+  'running={{.State.Running}} network={{.HostConfig.NetworkMode}} user={{.Config.User}}'
+docker logs --tail 100 leigod-discover-proxy
 ```
 
 更新源码或切换网络模式时，从原仓库目录重新执行完整 `install.sh` 命令。安装器会读取旧 `.leigod/docker.env` 判断原模式、构建新镜像并重建必要组件。命名卷 `leigod-plugin-state` 不会因为正常重装或模式切换而删除。
@@ -492,7 +490,7 @@ docker inspect leigod-plugin --format '{{.State.Health.Status}}'
 
 ### bridge 手机看不到设备
 
-检查 `--bind-address 0.0.0.0`、发现代理 service、6066/UDP、5588/TCP、同一 LAN 和 AP 客户端隔离。代理日志中的 timeout 表示请求已到宿主，但容器 6066 没有在 400 ms 内应答。
+检查 `--bind-address 0.0.0.0`、发现代理容器、6066/UDP、5588/TCP、同一 LAN 和 AP 客户端隔离。`docker logs leigod-discover-proxy` 中的 timeout 表示请求已到宿主网络命名空间，但加速容器 6066 没有在 400 ms 内应答。
 
 ### macvlan 容器不通
 
