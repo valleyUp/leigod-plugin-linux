@@ -28,7 +28,8 @@ for script in \
     libexec/leigod-game-enter \
     libexec/install-manifest.sh \
     packages/build-tar.sh \
-    tests/discover-proxy.sh; do
+    tests/discover-proxy.sh \
+    tests/dns-stub.sh; do
     sh -n "$REPO_DIR/$script" || fail "shell syntax failed: $script"
 done
 LEIGOD_LOG_LEVEL=warn sh "$REPO_DIR/docker/log-forwarder.sh" --self-test ||
@@ -59,6 +60,11 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-discover-proxy" "$REPO_DIR/src/leigod-discover-proxy.c"
 "$WORK_DIR/leigod-discover-proxy" --self-test || fail 'discovery proxy self-test failed'
+cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+    -fstack-protector-strong -Wl,-z,relro,-z,now \
+    -o "$WORK_DIR/leigod-dns-stub" "$REPO_DIR/src/leigod-dns-stub.c"
+"$WORK_DIR/leigod-dns-stub" --self-test || fail 'DNS stub self-test failed'
+sh "$REPO_DIR/tests/dns-stub.sh" || fail 'DNS stub live forward test failed'
 [ ! -e "$REPO_DIR/systemd/leigod-discover-proxy.service" ] ||
     fail 'host systemd discovery proxy unit still exists'
 grep -q 'network_mode: host' "$REPO_DIR/docker/compose.bridge.yml" ||
@@ -134,6 +140,12 @@ grep -q 'COPY docker/healthcheck.sh /usr/local/sbin/leigod-healthcheck' \
     "$REPO_DIR/docker/Dockerfile" || fail 'healthcheck script is not copied into the image'
 grep -q 'COPY docker/log-forwarder.sh /usr/local/sbin/leigod-log-forwarder' \
     "$REPO_DIR/docker/Dockerfile" || fail 'log forwarder is not copied into the image'
+grep -q 'leigod-dns-stub' "$REPO_DIR/docker/Dockerfile" ||
+    fail 'DNS stub helper is not built into the accelerator image'
+grep -q '127.0.0.53' "$REPO_DIR/docker/entrypoint.sh" ||
+    fail 'entrypoint does not start the 127.0.0.53 DNS stub'
+grep -q '127.0.0.53:53' "$REPO_DIR/docker/healthcheck.sh" ||
+    fail 'healthcheck does not require the DNS stub listener'
 grep -q 'LEIGOD_LOG_LEVEL: ${LEIGOD_LOG_LEVEL:-warn}' "$REPO_DIR/docker/compose.yml" ||
     fail 'Compose does not default to warning-level accelerator logs'
 grep -q '^LEIGOD_LOG_LEVEL=warn$' "$REPO_DIR/config/docker.env.example" ||

@@ -153,7 +153,7 @@ bridge 且 `--bind-address 0.0.0.0` 时，`docker-proxy` 在宿主监听 5588/TC
 
 - `/opt/leigod/acc-gw.router.amd64`
 - 雷神配置和 IP 数据库模板
-- 项目 `leigod-entrypoint`、`leigod-healthcheck` 与 `leigod-log-forwarder`
+- 项目 `leigod-entrypoint`、`leigod-healthcheck`、`leigod-log-forwarder` 与 `leigod-dns-stub`
 - `ca-certificates`、`iproute2`、`ipset`、`iptables`、`procps`
 
 容器不挂载：

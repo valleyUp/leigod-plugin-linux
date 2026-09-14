@@ -7,8 +7,10 @@ readonly STATE_DIR=/var/lib/leigod/config
 readonly TEMPLATE_DIR=/usr/share/leigod/config
 readonly LOG_DIR=/tmp/acc/log
 readonly LOG_FORWARDER=/usr/local/sbin/leigod-log-forwarder
+readonly DNS_STUB=/usr/local/sbin/leigod-dns-stub
 
 log_forwarder_pid=
+dns_stub_pid=
 
 log() {
     printf '[leigod] %s\n' "$*"
@@ -23,6 +25,10 @@ shutdown() {
     if [ -n "$log_forwarder_pid" ]; then
         kill -TERM "$log_forwarder_pid" 2>/dev/null || true
         wait "$log_forwarder_pid" 2>/dev/null || true
+    fi
+    if [ -n "$dns_stub_pid" ]; then
+        kill -TERM "$dns_stub_pid" 2>/dev/null || true
+        wait "$dns_stub_pid" 2>/dev/null || true
     fi
     exit 0
 }
@@ -139,6 +145,26 @@ log_forwarder_running() {
         { [ -n "$log_forwarder_pid" ] && kill -0 "$log_forwarder_pid" 2>/dev/null; }
 }
 
+prepare_dns_stub() {
+    if ! ip -4 addr show dev lo | grep -q ' inet 127.0.0.53/'; then
+        ip -4 addr add 127.0.0.53/32 dev lo
+    fi
+}
+
+start_dns_stub() {
+    if [ ! -x "$DNS_STUB" ]; then
+        log 'DNS stub helper is missing'
+        exit 1
+    fi
+    "$DNS_STUB" --bind 127.0.0.53 --upstream 223.6.6.6 --upstream 114.114.114.114 &
+    dns_stub_pid=$!
+    log "DNS stub listening on 127.0.0.53:53 (pid $dns_stub_pid)"
+}
+
+dns_stub_running() {
+    [ -n "$dns_stub_pid" ] && kill -0 "$dns_stub_pid" 2>/dev/null
+}
+
 accelerator_running() {
     pgrep -f '^/opt/leigod/acc-gw.router.amd64 .*daemon' >/dev/null 2>&1
 }
@@ -161,9 +187,16 @@ fi
 prepare_state
 prepare_wlan0
 prepare_dhcp_leases
+prepare_dns_stub
+start_dns_stub
 start_log_forwarder
 
 while :; do
+    if ! dns_stub_running; then
+        log 'DNS stub stopped; restarting it'
+        wait "$dns_stub_pid" 2>/dev/null || true
+        start_dns_stub
+    fi
     if ! log_forwarder_running; then
         log 'accelerator log forwarder stopped; restarting it'
         wait "$log_forwarder_pid" 2>/dev/null || true

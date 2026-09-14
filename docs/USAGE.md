@@ -370,9 +370,10 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 2. 把镜像模板中缺失的配置复制到 `/var/lib/leigod/config`。该目录由 named volume 覆盖；现有文件不会在启动时被校验、覆盖或清理。
 3. 找到承载默认路由的 Docker 接口，必要时改名为 `wlan0`，验证稳定 MAC，并恢复默认路由。
 4. 在容器 tmpfs 中生成 DHCP lease 种子，让闭源程序看到 Steam Deck/Windows PC 设备条目。
-5. 启动日志转发器，再用 `daemon + tun + 5588` 参数启动闭源程序。
-6. 每 5 秒检查 daemon；退出后重启。日志转发器退出时也会重启。
-7. 收到停止信号时先终止闭源 daemon 和日志转发器。
+5. 在 `lo` 上添加 `127.0.0.53/32`，启动 DNS stub，把该地址的 53/UDP 和 53/TCP 转到上游 DNS。
+6. 启动日志转发器，再用 `daemon + tun + 5588` 参数启动闭源程序。
+7. 每 5 秒检查 daemon、DNS stub 和日志转发器；退出后重启。
+8. 收到停止信号时先终止闭源 daemon、DNS stub 和日志转发器。
 
 ### 8.2 `docker/healthcheck.sh`
 
@@ -382,6 +383,7 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 - daemon 进程存在。
 - Web API 进程存在。
 - 5588/TCP 正在监听。
+- `127.0.0.53:53/UDP` 正在监听。
 
 ### 8.3 `docker/log-forwarder.sh`
 
@@ -498,4 +500,6 @@ docker inspect leigod-plugin --format '{{.State.Health.Status}}'
 
 ### 游戏能启动但域名解析失败
 
-游戏只进入 network namespace，仍读取宿主 `/etc/resolv.conf`。若其中只写 `127.0.0.1` 或 `127.0.0.53`，该地址在新 namespace 中不是宿主 DNS 服务；应按发行版网络方案提供可路由的上游 DNS。
+游戏只进入 network namespace，仍读取宿主 `/etc/resolv.conf`。宿主若只写 `127.0.0.53`，Wine 会向加速 netns 里的该地址发 UDP/53。入口会在 `lo` 上添加 `127.0.0.53/32`，并启动 `leigod-dns-stub` 把查询转到 `223.6.6.6` 与 `114.114.114.114`。不必改宿主 `resolv.conf`。
+
+若解析仍失败，检查容器健康检查是否包含 `127.0.0.53:53`，以及上游 DNS 是否可从加速 netns 访问。
