@@ -1,0 +1,20 @@
+[Unit]
+Description=Keep Leigod accelerator traffic on the main routing table
+Before=sing-box.service docker.service
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/libexec/leigod-direct-policy.py --subnet @LEIGOD_BRIDGE_SUBNET@
+ExecStop=/usr/local/libexec/leigod-direct-policy.py --subnet @LEIGOD_BRIDGE_SUBNET@ --remove
+RemainAfterExit=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

@@ -11,28 +11,14 @@ CONFIG_FILE=$RUNTIME_DIR/docker.env
 INSTALL_MANIFEST=$RUNTIME_DIR/install-manifest
 GROUP_NAME=leigod-game
 CONTAINER_NAME=leigod-plugin
+DIRECT_POLICY_HELPER=/usr/local/libexec/leigod-direct-policy.py
+DIRECT_POLICY_UNIT=/etc/systemd/system/leigod-direct-policy.service
+direct_policy_present=0
 BASE_URL=http://119.3.40.126
 
-network_mode=${LEIGOD_NETWORK_MODE:-macvlan}
-parent=${LEIGOD_PARENT:-}
-subnet=${LEIGOD_SUBNET:-}
-gateway=${LEIGOD_GATEWAY:-}
-container_ip=${LEIGOD_IPV4:-}
-bind_address=${LEIGOD_BIND_ADDRESS:-127.0.0.1}
-bridge_ipv4=${LEIGOD_BRIDGE_IPV4:-172.21.0.2}
-bridge_subnet=${LEIGOD_BRIDGE_SUBNET:-172.21.0.0/16}
-bridge_gateway=${LEIGOD_BRIDGE_GATEWAY:-172.21.0.1}
-device_mac=${LEIGOD_DEVICE_MAC:-}
-log_level=${LEIGOD_LOG_LEVEL:-warn}
-binary_sha256=${LEIGOD_BINARY_SHA256:-}
-xdb_sha256=${LEIGOD_XDB_SHA256:-}
-target_user=${LEIGOD_USER:-${SUDO_USER:-}}
 allow_unverified=0
+show_config=0
 previous_network_mode=
-
-if [ -r "$CONFIG_FILE" ]; then
-    previous_network_mode=$(sed -n 's/^LEIGOD_NETWORK_MODE=//p' "$CONFIG_FILE" | head -n 1)
-fi
 
 info() {
     printf '[INFO] %s\n' "$*"
@@ -50,6 +36,7 @@ fail() {
 MANIFEST_HELPERS=$SCRIPT_DIR/libexec/install-manifest.sh
 [ -r "$MANIFEST_HELPERS" ] || fail 'install manifest helpers are missing'
 . "$MANIFEST_HELPERS"
+
 
 usage() {
     cat <<'EOF'
@@ -70,12 +57,44 @@ Options:
   --xdb-sha256 HASH          Expected IP database SHA-256
   --allow-unverified-download
                              Explicitly accept legacy HTTP downloads without hashes
+  --show-config              Print resolved settings without deploying or auto-detecting LAN settings
   -h, --help                 Show this help
+
+Reinstalls retain saved settings. Precedence: CLI > environment > saved > defaults.
+Exit Steam, Ubisoft and games before an update that replaces their namespace.
 
 Place both vendor assets under opt/leigod/ to avoid downloading them. A supplied
 hash is always verified, whether an asset is local or downloaded.
 EOF
 }
+
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+[ -r "$SCRIPT_DIR/libexec/install-config.sh" ] || fail 'install configuration helpers are missing'
+. "$SCRIPT_DIR/libexec/install-config.sh"
+if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
+    leigod_config_validate "$CONFIG_FILE" || fail 'saved docker.env is not a regular, valid installer configuration'
+    previous_network_mode=$(leigod_config_get LEIGOD_NETWORK_MODE '')
+fi
+network_mode=${LEIGOD_NETWORK_MODE-$(leigod_config_get LEIGOD_NETWORK_MODE macvlan)}
+parent=${LEIGOD_PARENT-$(leigod_config_get LEIGOD_PARENT '')}
+subnet=${LEIGOD_SUBNET-$(leigod_config_get LEIGOD_SUBNET '')}
+gateway=${LEIGOD_GATEWAY-$(leigod_config_get LEIGOD_GATEWAY '')}
+container_ip=${LEIGOD_IPV4-$(leigod_config_get LEIGOD_IPV4 '')}
+bind_address=${LEIGOD_BIND_ADDRESS-$(leigod_config_get LEIGOD_BIND_ADDRESS 127.0.0.1)}
+bridge_ipv4=${LEIGOD_BRIDGE_IPV4-$(leigod_config_get LEIGOD_BRIDGE_IPV4 172.21.0.2)}
+bridge_subnet=${LEIGOD_BRIDGE_SUBNET-$(leigod_config_get LEIGOD_BRIDGE_SUBNET 172.21.0.0/16)}
+bridge_gateway=${LEIGOD_BRIDGE_GATEWAY-$(leigod_config_get LEIGOD_BRIDGE_GATEWAY 172.21.0.1)}
+device_mac=${LEIGOD_DEVICE_MAC-$(leigod_config_get LEIGOD_DEVICE_MAC '')}
+debug=${LEIGOD_DEBUG-$(leigod_config_get LEIGOD_DEBUG 0)}
+log_level=${LEIGOD_LOG_LEVEL-$(leigod_config_get LEIGOD_LOG_LEVEL warn)}
+binary_sha256=${LEIGOD_BINARY_SHA256-$(leigod_config_get LEIGOD_BINARY_SHA256 '')}
+xdb_sha256=${LEIGOD_XDB_SHA256-$(leigod_config_get LEIGOD_XDB_SHA256 '')}
+target_user=${LEIGOD_USER-$(leigod_config_get LEIGOD_USER "${SUDO_USER:-}")}
+# Compose gives exported variables precedence over --env-file. Resolved values
+# below (including CLI overrides) must be the sole interpolation source.
+unset LEIGOD_VERSION LEIGOD_NETWORK_MODE LEIGOD_PARENT LEIGOD_SUBNET LEIGOD_GATEWAY \
+    LEIGOD_IPV4 LEIGOD_BIND_ADDRESS LEIGOD_BRIDGE_IPV4 LEIGOD_BRIDGE_SUBNET \
+    LEIGOD_BRIDGE_GATEWAY LEIGOD_DEVICE_MAC LEIGOD_DEBUG LEIGOD_LOG_LEVEL LEIGOD_USER
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -90,16 +109,29 @@ while [ "$#" -gt 0 ]; do
         --binary-sha256) [ "$#" -ge 2 ] || fail '--binary-sha256 needs a value'; binary_sha256=$2; shift 2 ;;
         --xdb-sha256) [ "$#" -ge 2 ] || fail '--xdb-sha256 needs a value'; xdb_sha256=$2; shift 2 ;;
         --allow-unverified-download) allow_unverified=1; shift ;;
+        --show-config) show_config=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "unknown option: $1" ;;
     esac
 done
 
+if [ "$show_config" -eq 1 ]; then
+    printf '%s\n' \
+        "LEIGOD_NETWORK_MODE=$network_mode" "LEIGOD_PARENT=$parent" \
+        "LEIGOD_SUBNET=$subnet" "LEIGOD_GATEWAY=$gateway" "LEIGOD_IPV4=$container_ip" \
+        "LEIGOD_BIND_ADDRESS=$bind_address" "LEIGOD_BRIDGE_IPV4=$bridge_ipv4" \
+        "LEIGOD_BRIDGE_SUBNET=$bridge_subnet" "LEIGOD_BRIDGE_GATEWAY=$bridge_gateway" \
+        "LEIGOD_DEVICE_MAC=$device_mac" "LEIGOD_DEBUG=$debug" \
+        "LEIGOD_LOG_LEVEL=$log_level" "LEIGOD_USER=$target_user" \
+        "LEIGOD_BINARY_SHA256=$binary_sha256" "LEIGOD_XDB_SHA256=$xdb_sha256"
+    exit 0
+fi
+
 [ "$(id -u)" -eq 0 ] || fail 'run as root (sudo ./install.sh ...)'
 [ "$(uname -m)" = x86_64 ] || fail 'only x86_64 is supported'
 [ -c /dev/net/tun ] || fail '/dev/net/tun is unavailable; load the tun kernel module first'
 
-for command_name in awk cat cc curl cut getent grep groupadd head hostname id install ip mktemp sed sha256sum sudo tr usermod visudo; do
+for command_name in awk cat cc curl cut getent grep groupadd head hostname id install ip mktemp readlink sed sha256sum sudo tr usermod visudo; do
     command -v "$command_name" >/dev/null 2>&1 || fail "required command is missing: $command_name"
 done
 
@@ -134,10 +166,33 @@ case "$network_mode" in
     *) fail '--network must be macvlan or bridge' ;;
 esac
 
+# Verify ownership before replacing or stopping an installed routing guard.
+for managed_policy_target in "$DIRECT_POLICY_HELPER" "$DIRECT_POLICY_UNIT"; do
+    if [ -e "$managed_policy_target" ] || [ -L "$managed_policy_target" ]; then
+        leigod_manifest_file_matches "$INSTALL_MANIFEST" "$managed_policy_target" ||
+            fail "routing policy file is modified or not owned by this installation: $managed_policy_target"
+        direct_policy_present=1
+    fi
+done
+if [ "$direct_policy_present" -eq 1 ]; then
+    [ -f "$DIRECT_POLICY_HELPER" ] && [ -f "$DIRECT_POLICY_UNIT" ] ||
+        fail 'installed routing policy is incomplete; review it before reinstalling'
+fi
+if [ "$network_mode" = bridge ] || [ "$direct_policy_present" -eq 1 ]; then
+    command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required for bridge routing protection'
+    command -v systemctl >/dev/null 2>&1 || fail 'systemd is required for bridge routing protection'
+fi
+if [ "$network_mode" = bridge ]; then
+    [ -r "$SCRIPT_DIR/libexec/leigod-direct-policy.py" ] &&
+        [ -r "$SCRIPT_DIR/systemd/leigod-direct-policy.service" ] ||
+        fail 'direct routing policy sources are missing'
+fi
+
 case "$log_level" in
     off|error|warn|info|debug) ;;
     *) fail '--log-level must be off, error, warn, info or debug' ;;
 esac
+case "$debug" in 0|1) ;; *) fail 'LEIGOD_DEBUG must be 0 or 1' ;; esac
 
 valid_ipv4() {
     printf '%s\n' "$1" | awk -F. '
@@ -188,11 +243,34 @@ else
     valid_ipv4 "$bind_address" || fail 'bridge bind address must be IPv4'
     valid_ipv4 "$bridge_ipv4" || fail 'bridge container address is invalid'
     valid_ipv4 "$bridge_gateway" || fail 'bridge gateway is invalid'
-    parent=
-    subnet=
-    gateway=
-    container_ip=
-    printf '%s\n' "$bridge_subnet" | grep -Eq '^[0-9.]+/[0-9]+$' || fail 'bridge subnet is invalid'
+    bridge_subnet=$(python3 - "$bridge_subnet" "$bridge_ipv4" "$bridge_gateway" <<'PY_SUBNET'
+import ipaddress
+import sys
+network = ipaddress.ip_network(sys.argv[1], strict=True)
+if network.version != 4 or not network.is_private or network.prefixlen < 8:
+    raise SystemExit('a dedicated private IPv4 bridge subnet with prefix length >= 8 is required')
+for address in sys.argv[2:]:
+    ip = ipaddress.ip_address(address)
+    if ip not in network or ip in (network.network_address, network.broadcast_address):
+        raise SystemExit('bridge IP and gateway must be usable addresses in the bridge subnet')
+if sys.argv[2] == sys.argv[3]:
+    raise SystemExit('bridge IP and gateway must differ')
+print(network)
+PY_SUBNET
+    ) || fail 'invalid bridge subnet/IP/gateway configuration'
+fi
+
+
+# Check policy ownership/priorities before building or replacing containers.
+previous_policy_subnet=
+if [ "$direct_policy_present" -eq 1 ]; then
+    previous_policy_subnet=$(awk '$1 == "ExecStop=/usr/local/libexec/leigod-direct-policy.py" && $2 == "--subnet" {print $3; exit}' "$DIRECT_POLICY_UNIT")
+    [ -n "$previous_policy_subnet" ] || fail 'cannot read the verified direct policy subnet'
+    "$DIRECT_POLICY_HELPER" --subnet "$previous_policy_subnet" --check ||
+        fail 'installed direct routing policy has conflicting rules'
+elif [ "$network_mode" = bridge ]; then
+    python3 "$SCRIPT_DIR/libexec/leigod-direct-policy.py" --subnet "$bridge_subnet" --check ||
+        fail 'routing policy priorities 100-103 are already occupied'
 fi
 
 if [ -n "$target_user" ]; then
@@ -262,7 +340,9 @@ prepare_asset() {
 }
 
 work_dir=$(mktemp -d "$SCRIPT_DIR/.leigod-build.XXXXXX")
+config_pending=
 cleanup() {
+    [ -z "$config_pending" ] || rm -f -- "$config_pending"
     rm -rf -- "$work_dir"
 }
 trap cleanup EXIT HUP INT TERM
@@ -273,19 +353,6 @@ install -d -m 0755 "$RUNTIME_DIR"
 prepare_asset acc-gw.router.amd64 "$BASE_URL/acc-gw.router.amd64" "$binary_sha256" 0755
 prepare_asset config/ipdatacloud_country.xdb "$BASE_URL/ipdatacloud_country.xdb" "$xdb_sha256" 0644
 
-if [ -n "$previous_network_mode" ] && [ "$previous_network_mode" != "$network_mode" ]; then
-    case "$previous_network_mode" in
-        macvlan) previous_override=$SCRIPT_DIR/docker/compose.macvlan.yml ;;
-        bridge) previous_override=$SCRIPT_DIR/docker/compose.bridge.yml ;;
-        *) previous_override= ;;
-    esac
-    if [ -n "$previous_override" ] && [ -r "$previous_override" ]; then
-        info "removing previous $previous_network_mode network configuration"
-        "$DOCKER" compose --env-file "$CONFIG_FILE" --project-directory "$SCRIPT_DIR" \
-            -f "$SCRIPT_DIR/docker/compose.yml" -f "$previous_override" down --remove-orphans
-    fi
-fi
-
 wrapper_sha256=$(sha256sum "$SCRIPT_DIR/bin/leigod-game-run" | awk '{print $1}')
 if [ -e /usr/bin/leigod-game-run ]; then
     existing_wrapper_sha256=$(sha256sum /usr/bin/leigod-game-run 2>/dev/null | awk '{print $1}' || true)
@@ -294,7 +361,8 @@ if [ -e /usr/bin/leigod-game-run ]; then
         fail '/usr/bin/leigod-game-run already exists and is not owned by this installation'
     fi
 fi
-cat > "$CONFIG_FILE" <<EOF
+staged_config=$work_dir/docker.env
+cat > "$staged_config" <<EOF
 LEIGOD_VERSION=$VERSION
 LEIGOD_NETWORK_MODE=$network_mode
 LEIGOD_PARENT=$parent
@@ -306,12 +374,15 @@ LEIGOD_BRIDGE_IPV4=$bridge_ipv4
 LEIGOD_BRIDGE_SUBNET=$bridge_subnet
 LEIGOD_BRIDGE_GATEWAY=$bridge_gateway
 LEIGOD_DEVICE_MAC=$device_mac
-LEIGOD_DEBUG=0
+LEIGOD_DEBUG=$debug
 LEIGOD_LOG_LEVEL=$log_level
 LEIGOD_USER=$target_user
 LEIGOD_WRAPPER_SHA256=$wrapper_sha256
+LEIGOD_BINARY_SHA256=$binary_sha256
+LEIGOD_XDB_SHA256=$xdb_sha256
 EOF
-chmod 0600 "$CONFIG_FILE"
+chmod 0600 "$staged_config"
+leigod_config_validate "$staged_config" || fail 'resolved configuration contains unsupported characters'
 
 info 'building the game namespace helper'
 cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
@@ -335,14 +406,58 @@ else
     compose_override=$SCRIPT_DIR/docker/compose.bridge.yml
 fi
 
-info "starting accelerator with $network_mode networking"
 if [ "$network_mode" = bridge ]; then
-    "$DOCKER" compose --env-file "$CONFIG_FILE" --project-directory "$SCRIPT_DIR" \
-        -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" \
-        down --remove-orphans >/dev/null 2>&1 || true
-    "$DOCKER" network rm leigod-plugin-bridge >/dev/null 2>&1 || true
+    network_name=leigod-plugin-bridge
+    network_state=$(leigod_network_state "$network_name" bridge "$bridge_subnet" "$bridge_gateway" \
+        com.docker.network.bridge.name leigodbr0) || fail 'cannot reuse the requested bridge network'
+else
+    network_name=leigod-plugin-macvlan
+    network_state=$(leigod_network_state "$network_name" macvlan "$subnet" "$gateway" \
+        parent "$parent") || fail 'cannot reuse the requested macvlan network'
 fi
-"$DOCKER" compose --env-file "$CONFIG_FILE" --project-directory "$SCRIPT_DIR" \
+"$DOCKER" compose --env-file "$staged_config" --project-directory "$SCRIPT_DIR" \
+    -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" config -q
+new_config_hash=$("$DOCKER" compose --env-file "$staged_config" --project-directory "$SCRIPT_DIR" \
+    -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" config --hash accelerator | awk '{print $NF}')
+[ -n "$new_config_hash" ] || fail 'Compose cannot calculate the accelerator configuration hash'
+old_config_hash=$("$DOCKER" inspect --format '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$CONTAINER_NAME" 2>/dev/null || true)
+old_image=$("$DOCKER" inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
+new_image=$("$DOCKER" image inspect --format '{{.Id}}' "leigod-plugin:$VERSION")
+namespace_replace=0
+if [ "$network_state" = recreate ] || [ "$old_config_hash" != "$new_config_hash" ] || \
+   [ "$old_image" != "$new_image" ] || [ "$previous_network_mode" != "$network_mode" ]; then
+    namespace_replace=1
+fi
+if [ "$namespace_replace" -eq 1 ]; then
+    old_pid=$("$DOCKER" inspect --format '{{.State.Pid}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    case "$old_pid" in ''|0) ;; *)
+        live_clients=$(leigod_namespace_clients "$old_pid")
+        if [ -n "$live_clients" ]; then
+            printf '%s\n' "$live_clients" >&2
+            fail 'exit these Steam/Ubisoft/game processes, then rerun; their network namespace would be replaced'
+        fi
+    esac
+fi
+if [ "$network_state" = recreate ] || \
+   { [ -n "$previous_network_mode" ] && [ "$previous_network_mode" != "$network_mode" ]; }; then
+    case "$previous_network_mode" in
+        macvlan|bridge) previous_override=$SCRIPT_DIR/docker/compose.$previous_network_mode.yml ;;
+        '') previous_override=$compose_override ;;
+        *) fail 'saved network mode is invalid' ;;
+    esac
+    old_compose_config=$staged_config
+    [ ! -r "$CONFIG_FILE" ] || old_compose_config=$CONFIG_FILE
+    info 'network driver/IPAM changed; rebuilding the project network'
+    "$DOCKER" compose --env-file "$old_compose_config" --project-directory "$SCRIPT_DIR" \
+        -f "$SCRIPT_DIR/docker/compose.yml" -f "$previous_override" down --remove-orphans
+    if [ "$network_state" = recreate ] && "$DOCKER" network inspect "$network_name" >/dev/null 2>&1; then
+        "$DOCKER" network rm "$network_name"
+    fi
+else
+    info "network $network_name: $network_state; retaining existing network when present"
+fi
+info "starting accelerator with $network_mode networking"
+"$DOCKER" compose --env-file "$staged_config" --project-directory "$SCRIPT_DIR" \
     -f "$SCRIPT_DIR/docker/compose.yml" -f "$compose_override" up -d --remove-orphans
 
 health=starting
@@ -397,6 +512,29 @@ if [ "$network_mode" = bridge ]; then
     info "LAN discovery proxy listens on $bind_address:6066 and advertises that LAN address"
 fi
 
+# A changed subnet must remove the old unit's exact rules before replacement.
+if [ "$direct_policy_present" -eq 1 ] &&
+   { [ "$network_mode" != bridge ] || [ "$previous_policy_subnet" != "$bridge_subnet" ]; }; then
+    info 'stopping the previously verified direct routing policy'
+    systemctl disable --now leigod-direct-policy.service ||
+        fail 'cannot stop the previous direct routing policy'
+    "$DIRECT_POLICY_HELPER" --subnet "$previous_policy_subnet" --remove ||
+        fail 'cannot remove the previous direct policy rules'
+fi
+if [ "$network_mode" = bridge ]; then
+    python3 "$SCRIPT_DIR/libexec/leigod-direct-policy.py" --subnet "$bridge_subnet" --check ||
+        fail 'routing policy priorities 100-103 are already occupied'
+    info 'installing the dedicated bridge direct routing policy'
+    install -d -m 0755 /usr/local/libexec /etc/systemd/system
+    install -m 0755 "$SCRIPT_DIR/libexec/leigod-direct-policy.py" "$DIRECT_POLICY_HELPER"
+    sed "s|@LEIGOD_BRIDGE_SUBNET@|$bridge_subnet|g" \
+        "$SCRIPT_DIR/systemd/leigod-direct-policy.service" > "$work_dir/leigod-direct-policy.service"
+    install -m 0644 "$work_dir/leigod-direct-policy.service" "$DIRECT_POLICY_UNIT"
+elif [ "$direct_policy_present" -eq 1 ]; then
+    rm -f -- "$DIRECT_POLICY_HELPER" "$DIRECT_POLICY_UNIT"
+    systemctl daemon-reload
+fi
+
 info 'installing the restricted per-game launcher'
 install -d -m 0755 /usr/local/libexec
 install -m 0700 "$work_dir/leigod-netns-exec" /usr/local/libexec/leigod-netns-exec
@@ -421,8 +559,27 @@ for managed_target in \
     leigod_manifest_record_file "$manifest_tmp" "$managed_target" ||
         fail "cannot record installed file in manifest: $managed_target"
 done
+if [ "$network_mode" = bridge ]; then
+    for managed_target in "$DIRECT_POLICY_HELPER" "$DIRECT_POLICY_UNIT"; do
+        leigod_manifest_record_file "$manifest_tmp" "$managed_target" ||
+            fail "cannot record routing policy file in manifest: $managed_target"
+    done
+fi
 install -m 0600 "$manifest_tmp" "$INSTALL_MANIFEST"
+if [ "$network_mode" = bridge ]; then
+    systemctl daemon-reload
+    systemctl enable --now leigod-direct-policy.service ||
+        fail 'cannot activate the direct routing policy; inspect its systemd journal'
+    info "bridge leigodbr0 uses main routing for $bridge_subnet; missing routes fail without TUN fallback"
+    info 'sing-box TUN must exclude leigodbr0 and the bridge return subnet; see docs/SING_BOX_BYPASS.md'
+fi
 
+# Commit only after build, deployment, health checks and host installation all
+# succeeded. A failed build/deploy leaves the previous saved settings intact.
+config_pending=$(mktemp "$RUNTIME_DIR/.docker.env.XXXXXX")
+install -m 0600 "$staged_config" "$config_pending"
+mv -f -- "$config_pending" "$CONFIG_FILE"
+config_pending=
 info 'installation complete'
 printf '%s\n' \
     'Log out and back in once so the leigod-game group applies.' \

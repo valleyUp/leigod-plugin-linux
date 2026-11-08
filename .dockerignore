@@ -1,4 +1,6 @@
 .git
+__pycache__
+*.pyc
 .agents
 .codex
 .leigod

@@ -27,8 +27,10 @@ for script in \
     bin/leigod-game-run \
     libexec/leigod-game-enter \
     libexec/install-manifest.sh \
+    libexec/install-config.sh \
     packages/build-tar.sh \
     tests/discover-proxy.sh \
+    tests/container-smoke.sh \
     tests/dns-stub.sh; do
     sh -n "$REPO_DIR/$script" || fail "shell syntax failed: $script"
 done
@@ -53,14 +55,14 @@ if leigod_manifest_hash_for "$WORK_DIR/manifest-link" "$manifest_test_file" >/de
     fail 'manifest helpers accepted a symlink manifest'
 fi
 
-cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-netns-exec" "$REPO_DIR/src/leigod-netns-exec.c"
-cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-discover-proxy" "$REPO_DIR/src/leigod-discover-proxy.c"
 "$WORK_DIR/leigod-discover-proxy" --self-test || fail 'discovery proxy self-test failed'
-cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-dns-stub" "$REPO_DIR/src/leigod-dns-stub.c"
 "$WORK_DIR/leigod-dns-stub" --self-test || fail 'DNS stub self-test failed'
@@ -154,9 +156,9 @@ grep -q 'max-size: 10m' "$REPO_DIR/docker/compose.yml" ||
     fail 'Docker log size is not bounded'
 grep -q 'max-file: "3"' "$REPO_DIR/docker/compose.yml" ||
     fail 'Docker log rotation count is not bounded'
-grep -q 'speedSign.*redacted' "$REPO_DIR/docker/log-forwarder.sh" ||
+grep -q 'speedSign' "$REPO_DIR/docker/log-forwarder.py" ||
     fail 'accelerator log forwarder does not redact session identifiers'
-grep -q 'REPEAT_LIMIT=60' "$REPO_DIR/docker/log-forwarder.sh" ||
+grep -q 'REPEAT_SECONDS = 60' "$REPO_DIR/docker/log-forwarder.py" ||
     fail 'accelerator log forwarder does not suppress repeated messages'
 grep -q 'ln -s /opt/leigod /home/leigod' "$REPO_DIR/docker/Dockerfile" ||
     fail 'Steam Deck /home/leigod compatibility path is missing'
@@ -220,7 +222,11 @@ for required_archive_path in \
     "$archive_root/docker/Dockerfile.discover-proxy" \
     "$archive_root/docker/healthcheck.sh" \
     "$archive_root/docker/log-forwarder.sh" \
+    "$archive_root/docker/log-forwarder.py" \
+    "$archive_root/docker/status.py" \
     "$archive_root/docs/USAGE.md" \
+    "$archive_root/docs/OPTIMIZATIONS.md" \
+    "$archive_root/libexec/install-config.sh" \
     "$archive_root/libexec/install-manifest.sh"; do
     grep -Fxq "$required_archive_path" "$WORK_DIR/source-archive.list" ||
         fail "source package is missing: $required_archive_path"

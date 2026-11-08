@@ -24,7 +24,7 @@ fail() {
     exit 1
 }
 
-cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 \
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -D_FORTIFY_SOURCE=2 \
     -fstack-protector-strong -Wl,-z,relro,-z,now \
     -o "$WORK_DIR/leigod-dns-stub" "$REPO_DIR/src/leigod-dns-stub.c"
 

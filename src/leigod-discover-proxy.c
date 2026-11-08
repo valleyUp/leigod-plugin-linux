@@ -6,16 +6,19 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define DISCOVERY_PORT 6066
 #define PACKET_MAX 2048
 #define REPLY_TIMEOUT_MS 400
+#define PENDING_MAX 16
 
 static volatile sig_atomic_t stopping;
 
@@ -171,6 +174,7 @@ static ssize_t recv_lan_packet(int fd, char *buffer, size_t capacity,
     if (received < 0) {
         return received;
     }
+    if (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) return -1;
 
     for (cmsg = CMSG_FIRSTHDR(&message); cmsg != NULL; cmsg = CMSG_NXTHDR(&message, cmsg)) {
         if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
@@ -216,27 +220,39 @@ static int send_lan_packet(int fd, const char *buffer, size_t length,
     return 0;
 }
 
-static ssize_t query_container(int fd, const struct sockaddr_in *container,
-                               const char *request, size_t request_len,
-                               char *reply, size_t reply_cap)
+static int64_t now_ms(void)
 {
-    struct pollfd pollfd;
-    ssize_t received;
+    struct timespec ts;
+    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
-    if (sendto(fd, request, request_len, 0, (const struct sockaddr *)container,
-               sizeof(*container)) < 0) {
+static bool packet_prefix(const char *packet, size_t length, const char *prefix)
+{
+    size_t size = strlen(prefix);
+    return length >= size && memcmp(packet, prefix, size) == 0 &&
+        (length == size || packet[size] == ' ' || packet[size] == '\r' || packet[size] == '\n');
+}
+
+struct pending {
+    int fd;
+    int64_t deadline;
+    struct sockaddr_in from;
+    struct in_addr local_ip;
+};
+
+static int start_query(const struct sockaddr_in *container, const char *request, size_t length)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) return -1;
+    /* A fresh, connected socket validates the peer and isolates late replies
+     * from subsequent requests. No shared socket or unbounded request queue. */
+    if (connect(fd, (const struct sockaddr *)container, sizeof(*container)) != 0 ||
+        send(fd, request, length, 0) != (ssize_t)length) {
+        close(fd);
         return -1;
     }
-
-    pollfd.fd = fd;
-    pollfd.events = POLLIN;
-    pollfd.revents = 0;
-    if (poll(&pollfd, 1, REPLY_TIMEOUT_MS) <= 0) {
-        errno = ETIMEDOUT;
-        return -1;
-    }
-    received = recv(fd, reply, reply_cap, 0);
-    return received;
+    return fd;
 }
 
 int main(int argc, char **argv)
@@ -246,12 +262,13 @@ int main(int argc, char **argv)
     uint16_t port = DISCOVERY_PORT;
     struct in_addr bind_address;
     struct in_addr container_address;
-    struct in_addr any_address;
     struct sockaddr_in container;
     int lan_fd;
-    int ns_fd;
     int arg;
     char advertise[INET_ADDRSTRLEN];
+    struct pending pending[PENDING_MAX];
+    unsigned int timeouts = 0;
+    int64_t next_warning = 0;
 
     for (arg = 1; arg < argc; arg++) {
         if (strcmp(argv[arg], "--self-test") == 0) {
@@ -296,8 +313,7 @@ int main(int argc, char **argv)
     signal(SIGINT, on_stop);
 
     lan_fd = create_socket(&bind_address, port, true);
-    any_address.s_addr = htonl(INADDR_ANY);
-    ns_fd = create_socket(&any_address, 0, false);
+    for (arg = 0; arg < PENDING_MAX; arg++) pending[arg].fd = -1;
 
     memset(&container, 0, sizeof(container));
     container.sin_family = AF_INET;
@@ -309,57 +325,70 @@ int main(int argc, char **argv)
             bind_text, port, container_text, port);
 
     while (stopping == 0) {
-        struct pollfd pollfd = { .fd = lan_fd, .events = POLLIN, .revents = 0 };
-        struct sockaddr_in from;
-        struct in_addr local_ip;
-        char request[PACKET_MAX];
-        char reply[PACKET_MAX];
-        ssize_t request_len;
-        ssize_t received;
-        size_t reply_len;
-        int status;
-
-        if (poll(&pollfd, 1, 1000) <= 0) {
-            continue;
+        struct pollfd fds[PENDING_MAX + 1];
+        int timeout = 1000;
+        int64_t now = now_ms();
+        fds[0] = (struct pollfd){ .fd = lan_fd, .events = POLLIN };
+        for (arg = 0; arg < PENDING_MAX; arg++) {
+            fds[arg + 1] = (struct pollfd){ .fd = pending[arg].fd, .events = POLLIN };
+            if (pending[arg].fd >= 0) {
+                int remaining = (int)(pending[arg].deadline - now);
+                if (remaining < 0) remaining = 0;
+                if (remaining < timeout) timeout = remaining;
+            }
         }
-        request_len = recv_lan_packet(lan_fd, request, sizeof(request), &from, &local_ip);
-        if (request_len <= 0) {
-            continue;
+        (void)poll(fds, PENDING_MAX + 1, timeout);
+        now = now_ms();
+        for (arg = 0; arg < PENDING_MAX; arg++) {
+            char reply[PACKET_MAX];
+            ssize_t received;
+            size_t length;
+            if (pending[arg].fd < 0) continue;
+            if (now >= pending[arg].deadline) {
+                timeouts++;
+                close(pending[arg].fd);
+                pending[arg].fd = -1;
+                continue;
+            }
+            if (!(fds[arg + 1].revents & (POLLIN | POLLERR))) continue;
+            received = recv(pending[arg].fd, reply, sizeof(reply), MSG_TRUNC | MSG_DONTWAIT);
+            if (received <= 0 || received > PACKET_MAX ||
+                !packet_prefix(reply, (size_t)received, "<NBOX> WHO")) continue;
+            length = (size_t)received;
+            if (inet_ntop(AF_INET, &pending[arg].local_ip, advertise, sizeof(advertise)) != NULL &&
+                rewrite_ip_field(reply, &length, sizeof(reply), advertise) == 1 &&
+                send_lan_packet(lan_fd, reply, length, &pending[arg].from, &pending[arg].local_ip) != 0) {
+                fprintf(stderr, "leigod-discover-proxy: cannot send rewritten reply: %s\n", strerror(errno));
+            }
+            close(pending[arg].fd);
+            pending[arg].fd = -1;
         }
-        if (from.sin_addr.s_addr == container_address.s_addr) {
-            continue;
+        if (fds[0].revents & POLLIN) {
+            struct sockaddr_in from;
+            struct in_addr local_ip;
+            char request[PACKET_MAX];
+            ssize_t length = recv_lan_packet(lan_fd, request, sizeof(request), &from, &local_ip);
+            if (length <= 0 || from.sin_addr.s_addr == container_address.s_addr ||
+                !packet_prefix(request, (size_t)length, "<NBOX> HELLO")) continue;
+            if (local_ip.s_addr == 0) local_ip = bind_address;
+            if (local_ip.s_addr == 0) continue;
+            for (arg = 0; arg < PENDING_MAX; arg++) {
+                if (pending[arg].fd < 0) {
+                    int fd = start_query(&container, request, (size_t)length);
+                    if (fd >= 0) pending[arg] = (struct pending){ .fd = fd, .deadline = now_ms() + REPLY_TIMEOUT_MS,
+                        .from = from, .local_ip = local_ip };
+                    break;
+                }
+            }
         }
-
-        received = query_container(ns_fd, &container, request, (size_t)request_len, reply,
-                                   sizeof(reply));
-        if (received <= 0) {
-            fprintf(stderr, "leigod-discover-proxy: container discovery reply timed out\n");
-            continue;
-        }
-        reply_len = (size_t)received;
-
-        if (local_ip.s_addr == 0 || local_ip.s_addr == htonl(INADDR_ANY)) {
-            local_ip = bind_address;
-        }
-        if (local_ip.s_addr == 0 || local_ip.s_addr == htonl(INADDR_ANY)) {
-            continue;
-        }
-        if (inet_ntop(AF_INET, &local_ip, advertise, sizeof(advertise)) == NULL) {
-            continue;
-        }
-
-        status = rewrite_ip_field(reply, &reply_len, sizeof(reply), advertise);
-        if (status < 0) {
-            fprintf(stderr, "leigod-discover-proxy: cannot rewrite advertised IP\n");
-            continue;
-        }
-        if (send_lan_packet(lan_fd, reply, reply_len, &from, &local_ip) != 0) {
-            fprintf(stderr, "leigod-discover-proxy: cannot send rewritten reply: %s\n",
-                    strerror(errno));
+        if (timeouts && now >= next_warning) {
+            fprintf(stderr, "leigod-discover-proxy: %u container discovery replies timed out\n", timeouts);
+            timeouts = 0;
+            next_warning = now + 60000;
         }
     }
 
     close(lan_fd);
-    close(ns_fd);
+    for (arg = 0; arg < PENDING_MAX; arg++) if (pending[arg].fd >= 0) close(pending[arg].fd);
     return 0;
 }

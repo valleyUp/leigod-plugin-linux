@@ -36,6 +36,12 @@ macvlan 是默认值，因为容器能用独立 LAN 身份与网关通信，无�
 
 无线网络常限制额外源 MAC。bridge 是显式回退：加速容器仍保留相同 namespace 边界，只发布 Web/API 的 5588/TCP；默认 bind 到 loopback。局域网发现由 `leigod-discover-proxy` sidecar 监听 6066/UDP（`network_mode: host`、非 root、`cap_drop: ALL`、只读根文件系统），只做 NBOX 探测转发并把通告 IP 改写成宿主地址。6066 不经 docker-proxy 发布。程序的 10001/TCP 调试端口不发布。两种配置都没有 `privileged`、host PID/IPC 或 Docker socket。host network 仅用于该开源 sidecar，不用于闭源加速容器。
 
+bridge 直连保护由开源宿主 helper 管理四条仅匹配加速子网的 IPv4 `ip rule`，并由
+`leigod-direct-policy.service` 在开机恢复。正常流量查询 `main`；没有路由时返回不可达，
+避免被 sing-box 的 TUN 备用路由接管。helper 不修改默认路由或宿主防火墙；规则优先级
+100–103 冲突时拒绝覆盖，安装和卸载沿用系统文件 SHA-256 清单。该单元只保留
+`CAP_NET_ADMIN`，不会为闭源容器增加宿主网络权限。详见 [SING_BOX_BYPASS.md](SING_BOX_BYPASS.md)。
+
 ## 资产完整性
 
 仓库不能为未分发的第三方资产声明可信哈希。安全默认是：本地或下载的资产只要调用者提供了预期 SHA-256 就必须匹配；缺失资产且没有哈希时拒绝 HTTP 自动下载。
@@ -61,6 +67,6 @@ macvlan 是默认值，因为容器能用独立 LAN 身份与网关通信，无�
 ./tests/security-policy.sh
 ```
 
-该检查会编译 C helper、检查所有 shell 语法、解析 macvlan/bridge 的 Compose 最终配置，并拒绝 privileged、Docker socket、额外 capability 或宿主网络管理命令重新进入安装路径。host network 只允许出现在 bridge 发现代理 sidecar。
+该检查会编译 C helper、检查所有 shell 语法、解析 macvlan/bridge 的 Compose 最终配置，并拒绝 privileged、Docker socket、额外容器 capability 或宿主默认路由/防火墙修改。bridge 路由保护只允许管理专用网段的策略规则。host network 只允许出现在 bridge 发现代理 sidecar。
 
 容器健康检查要求 TUN 设备、daemon 进程、Web 控制进程以及 `5588/TCP` 监听同时存在，避免 Web 子进程崩溃时仅凭 daemon PID 继续报告 healthy。

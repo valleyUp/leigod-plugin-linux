@@ -31,6 +31,10 @@ services:
         target: /var/lib/leigod/config
         volume:
           nocopy: true
+    # Keep external DNS forwarding inside the accelerator network namespace.
+    dns:
+      - 223.6.6.6
+      - 114.114.114.114
     environment:
       LEIGOD_DEVICE_MAC: ${LEIGOD_DEVICE_MAC:?set LEIGOD_DEVICE_MAC}
       LEIGOD_DEBUG: ${LEIGOD_DEBUG:-0}

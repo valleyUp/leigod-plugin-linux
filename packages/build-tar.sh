@@ -17,6 +17,8 @@ tar -C "$REPO_DIR" \
     --exclude=.git \
     --exclude=.agents \
     --exclude=.codex \
+    --exclude=__pycache__ \
+    --exclude='*.pyc' \
     --exclude=.leigod \
     --exclude='.leigod-build.*' \
     --exclude='.leigod-test.*' \

@@ -11,6 +11,7 @@ readonly DNS_STUB=/usr/local/sbin/leigod-dns-stub
 
 log_forwarder_pid=
 dns_stub_pid=
+web_missing=0
 
 log() {
     printf '[leigod] %s\n' "$*"
@@ -205,6 +206,15 @@ while :; do
     if ! accelerator_running; then
         log 'accelerator is not running; starting it'
         start_accelerator
+        web_missing=0
+    elif ! pgrep -f '^/opt/leigod/acc-gw.router.amd64 .*web' >/dev/null 2>&1; then
+        web_missing=$((web_missing + 1))
+        if [ "$web_missing" -ge 4 ]; then
+            log 'Web control process is missing; exiting for Docker to restart the service'
+            shutdown
+        fi
+    else
+        web_missing=0
     fi
     sleep 5 &
     wait $!

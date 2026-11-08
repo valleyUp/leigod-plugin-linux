@@ -31,11 +31,15 @@
 
 实际部署请先阅读 [docs/USAGE.md](docs/USAGE.md)，其中分别给出 macvlan/bridge 配置、手机发现、Lutris 使用、脚本调用链和故障定位。更完整的审计、信任边界和残余风险见 [docs/SECURITY.md](docs/SECURITY.md)；宿主安装内容与仓库内构建边界见 [docs/IMPLEMENTATION_REVIEW.md](docs/IMPLEMENTATION_REVIEW.md)。
 
+宿主运行 sing-box TUN 时，参见 [加速 namespace 直接绕过 sing-box](docs/SING_BOX_BYPASS.md)。bridge 使用固定网桥 `leigodbr0`、直连 DNS 和仅针对加速网段的路由保护。
+
+进入该 namespace 的 Steam、Ubisoft 和游戏进程在开启加速时交给雷神处理，关闭加速后全部直连，包括 Steam Community。社区专用代理分流暂不实现。安装、诊断、DNS、discovery 与日志优化说明见 [docs/OPTIMIZATIONS.md](docs/OPTIMIZATIONS.md)。
+
 ## 系统要求
 
 - x86_64 Linux，内核提供 TUN、macvlan（使用 bridge 回退时可无 macvlan）
 - Docker Engine 和 Docker Compose v2
-- `cc`、`curl`、`iproute2`、`sudo`、`sha256sum`
+- `cc`、`curl`、`iproute2`、`sudo`、`sha256sum`；bridge 路由保护另需 Python 3 和 systemd
 - 安装时具有 root 权限；游戏本身以普通桌面用户运行
 
 不要把桌面用户加入 `docker` 组：该组通常等价于 root。游戏入口使用受限 sudo 规则，只允许调用会在执行游戏前降权的固定 helper。
@@ -161,9 +165,20 @@ docker logs --tail 100 leigod-plugin
 
 正常结果应包含 `privileged=false`、`network=leigod-plugin-macvlan`（或 bridge 回退网络），且能力只有 `NET_ADMIN`、`NET_RAW`。容器健康检查同时要求 daemon、Web 控制进程和 `5588/TCP` 监听存在；仅有 daemon PID 不再判定为 healthy。
 
-闭源程序把主要运行日志写入容器 `/tmp/acc/log`，入口会轮转感知地转发到 stdout，并用 `[leigod:daemon]`、`[leigod:web]`、`[leigod:game]` 和 `[leigod:console]` 标记来源。默认只转发 `WARN/ERROR`，连续相同消息会折叠计数，已知 token、nonce、user ID、授权头、密码和加速会话标识会脱敏。Docker `json-file` 日志限制为 3 个、每个 10 MiB。
+闭源程序把主要运行日志写入容器 `/tmp/acc/log`，一个 Python 进程跟随四个日志文件并转发到 stdout，用 `[leigod:daemon]`、`[leigod:web]`、`[leigod:game]` 和 `[leigod:console]` 标记来源。默认只转发 `WARN/ERROR`，相同消息在 60 秒窗口内汇总重复次数，交替出现的重复告警也会折叠；已知 token、nonce、user ID、授权头、密码和加速会话标识会脱敏。Docker `json-file` 日志限制为 3 个、每个 10 MiB。
 
 安装时可用 `--log-level off|error|warn|info|debug` 调整详细程度。例如临时排障可重新执行原安装命令并增加 `--log-level info`，结束后恢复 `warn`。`info/debug` 仍可能包含游戏访问的域名、IP 和闭源程序尚未识别的敏感字段，不建议长期启用或直接公开日志。
+
+容器健康与加速状态分别查看。未开启加速时，`healthy` / `idle` 是正常结果：
+
+```bash
+docker exec leigod-plugin /usr/local/sbin/leigod-status
+docker exec leigod-plugin /usr/local/sbin/leigod-status --json --sample-seconds 5
+```
+
+`capture_ready` 表示加速进程、TUN、策略路由与 OUTPUT 标记齐备；TUN 计数增长表示隧道有流量，特定游戏是否由节点转发仍需核对该游戏连接与 `acc_PC.log`。日志中的 `offline` 不能单独作为加速失败依据。
+
+重装会保留旧参数，优先级为命令行 > 环境变量 > 已保存配置 > 首次安装默认值。更新前退出 Steam、Ubisoft 和游戏，再运行 `sudo ./install.sh`；可以先用 `sudo ./install.sh --show-config` 检查参数。网络配置未变化时保留原网络；镜像或服务配置变化仍可能替换容器 namespace，安装器会检查并拒绝遗留正在运行的宿主应用。新配置只在安装成功后原子替换保存，构建失败不会覆盖旧配置。
 
 bridge 模式确认手机发现通告的是宿主 LAN 地址而不是 `172.x`：
 

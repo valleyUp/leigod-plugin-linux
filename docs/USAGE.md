@@ -2,6 +2,8 @@
 
 本文面向实际部署者，说明如何在 `macvlan` 与 `bridge` 之间选择、准备参数、执行安装、配置 Lutris、验证运行状态，以及每个脚本在宿主和容器中做了什么。安全边界和残余风险另见 [SECURITY.md](SECURITY.md)，文件安装清单和实现审计另见 [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md)。
 
+宿主使用 sing-box TUN 时，还需阅读 [SING_BOX_BYPASS.md](SING_BOX_BYPASS.md)：bridge 固定为 `leigodbr0`，安装器管理加速网段的路由保护；sing-box 的 TUN 接口/MAC/回程排除需配套配置。
+
 ## 1. 先说明设备 MAC
 
 仓库中发现代理的自测使用示例 MAC，例如 `02:11:22:33:44:55`。它只是一段测试报文，用来验证 `ip=` 字段改写，不参与容器启动、手机发现或绑定。
@@ -237,7 +239,7 @@ sudo env \
     --xdb-sha256 <XDB_SHA256>
 ```
 
-安装器会先停止旧 bridge Compose 项目并删除旧 `leigod-plugin-bridge` 网络，再用固定 IPAM 重建，避免旧子网参数残留。不会删除 `leigod-plugin-state`。
+安装器会比较现有网络的驱动、IPAM 和网桥选项，配置一致时复用；仅参数变化或模式切换时停止旧项目并重建网络。不会删除 `leigod-plugin-state`。镜像更新仍可能替换容器 namespace，更新前须退出其中的 Steam、Ubisoft 和游戏；安装器发现残留宿主进程时会拒绝替换。
 
 ### 5.3 bridge 发现代理如何工作
 
@@ -245,8 +247,8 @@ sudo env \
 
 1. sidecar 与宿主共用网络命名空间，在 `--bind-address:6066/UDP` 等待手机广播或单播。
 2. 它取得接收报文的宿主本地 IPv4；使用 `0.0.0.0` 时依靠 `IP_PKTINFO` 区分实际收到报文的接口地址。
-3. 它把最多 2048 字节的请求转发到固定 bridge 容器 IP 的 6066/UDP。
-4. 最多等待 400 ms 获取容器应答。
+3. 它只把最多 2048 字节的 `<NBOX> HELLO` 请求转发到固定 bridge 容器 IP 的 6066/UDP，每个请求使用独立连接的 UDP socket，最多 16 个并发请求。
+4. 每个请求最多等待 400 ms，只接受固定容器 IP/端口的 `<NBOX> WHO` 应答；超时关闭独立 socket，隔离迟到回复。
 5. 仅把应答中的 `ip=` 值替换为宿主收到请求的 LAN 地址；`model=`、`sn=`/MAC、`bound=` 等字段保持容器原值。
 6. 它从同一个宿主 LAN 地址把改写后的应答发回手机。
 
@@ -323,7 +325,7 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 /usr/bin/leigod-game-run -- lutris
 ```
 
-但这会让整个 Lutris 进程树进入加速网络，不是日常推荐配置。本项目当前不自动操作手机端的开始/暂停状态；加速器启停仍由 App 控制。
+但这会让整个 Lutris 进程树进入加速网络，不是日常推荐配置。本项目当前不自动操作手机端的开始/暂停状态；加速器启停仍由 App 控制。也支持先退出已有 Steam，再运行 `leigod-game-run -- steam`，让 Steam、steamwebhelper 及其游戏子进程共同进入 namespace。加速关闭时其中的业务连接全部直连，包括 Steam Community，暂不实现社区专用代理分流。
 
 ## 7. 游戏 wrapper 的实际调用链
 
@@ -372,7 +374,7 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 4. 在容器 tmpfs 中生成 DHCP lease 种子，让闭源程序看到 Steam Deck/Windows PC 设备条目。
 5. 在 `lo` 上添加 `127.0.0.53/32`，启动 DNS stub，把该地址的 53/UDP 和 53/TCP 转到上游 DNS。
 6. 启动日志转发器，再用 `daemon + tun + 5588` 参数启动闭源程序。
-7. 每 5 秒检查 daemon、DNS stub 和日志转发器；退出后重启。
+7. 每 5 秒检查 daemon、DNS stub 和日志转发器；退出后重启。Web 进程持续缺失约 20 秒时退出入口，由 Docker 重启服务。
 8. 收到停止信号时先终止闭源 daemon、DNS stub 和日志转发器。
 
 ### 8.2 `docker/healthcheck.sh`
@@ -383,14 +385,17 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 - daemon 进程存在。
 - Web API 进程存在。
 - 5588/TCP 正在监听。
-- `127.0.0.53:53/UDP` 正在监听。
+- `127.0.0.53:53/UDP` 与 TCP 正在监听。
+
+是否开启加速由独立的 `leigod-status` 诊断，未开启加速不影响健康检查。
 
 ### 8.3 `docker/log-forwarder.sh`
 
 - 跟随 `acc_daemon.log`、`acc_PC.log`、`web_api.log` 和 console，标为 `daemon/game/web/console`。
 - 根据 `LEIGOD_LOG_LEVEL` 过滤，默认 `warn`。
 - 对已知 token、nonce、user ID、authorization、cookie、password、`speedSign` 和敏感 URL 参数脱敏。
-- 单行最多输出 4096 字符；相邻相同消息每 60 条汇总一次。
+- 由一个 Python 标准库进程跟随四个文件，支持轮转、截断和部分行。
+- 单行最多输出 4096 字符；按来源和消息内容每 60 秒汇总重复次数，也覆盖交替重复的告警，最多保留 1024 个指纹。
 - Docker `json-file` 日志最多 3 个文件、每个 10 MiB。
 
 脱敏规则只能覆盖已知格式。`info/debug` 日志仍按敏感数据处理，不应直接上传公开平台。
@@ -399,16 +404,16 @@ Lutris 会把实际 runner 命令追加在 `--` 后面。只有 Wine/游戏进�
 
 安装器需要 root，但不会直接修改宿主默认路由、全局 iptables/nftables 或 `/etc/resolv.conf`：
 
-1. 解析参数，检查 root、x86_64、TUN、Docker/Compose 和宿主工具。
+1. 安全读取旧配置再解析参数，优先级为 CLI > 环境变量 > 已保存值 > 默认值；检查 root、x86_64、TUN、Docker/Compose 和宿主工具。`--show-config` 可只读预览解析结果，不部署或自动检测 LAN 参数。
 2. 拒绝占用同名容器的其他 Compose 项目。
 3. 验证网络、日志级别、桌面用户和 MAC；macvlan 自动检测部分 LAN 参数，但强制要求静态 `--ip`。
 4. 准备第三方资产：本地文件优先；有预期哈希时强制匹配；无文件、无哈希时只有显式不安全开关才能下载。
-5. 在仓库内创建 `.leigod/docker.env`（`0600`），记录网络、稳定 MAC、用户、日志级别和 wrapper 哈希。账号绑定 token 不写在这里。
+5. 在仓库私有临时目录准备候选 `docker.env`（`0600`），记录网络、稳定 MAC、用户、日志级别、debug、预期资产哈希和 wrapper 哈希。账号绑定 token 不写在这里。安装成功前不会覆盖旧配置。
 6. 在仓库内随机 `.leigod-build.*` 临时目录编译 namespace helper。
 7. 以当前仓库为唯一 build context 构建 `leigod-plugin:1.2.2.15`；bridge 再构建 `leigod-discover-proxy:1.2.2.15`。
-8. 选择相应 Compose override 启动容器，并最多等待约 40 秒成为 healthy。bridge 还会确认发现代理容器为 running、host network、非 privileged。
+8. 比较网络参数、镜像 ID 和服务配置 hash；需要替换 namespace 时先检查残留宿主应用。选择相应 Compose override 启动容器，复用未变化的网络，并最多等待约 40 秒成为 healthy。bridge 发现代理等待 accelerator 健康后启动，并确认 running、host network、非 privileged。
 9. 容器健康后才安装 launcher/helper、创建 `leigod-game` 组、追加桌面用户并校验/安装 sudoers。
-10. 对固定系统文件计算 SHA-256，保存到 `.leigod/install-manifest`（`0600`），最后删除临时构建目录。
+10. 对固定系统文件计算 SHA-256，保存到 `.leigod/install-manifest`（`0600`），启用 bridge 路由保护；全部成功后原子替换 `.leigod/docker.env`，最后删除临时构建目录。
 
 安装会写入的系统位置仅包括：
 
@@ -437,7 +442,15 @@ docker inspect leigod-discover-proxy --format \
 docker logs --tail 100 leigod-discover-proxy
 ```
 
-更新源码或切换网络模式时，从原仓库目录重新执行完整 `install.sh` 命令。安装器会读取旧 `.leigod/docker.env` 判断原模式、构建新镜像并重建必要组件。命名卷 `leigod-plugin-state` 不会因为正常重装或模式切换而删除。
+更新源码时，先退出 Steam、Ubisoft 和游戏，再从原仓库运行 `sudo ./install.sh`。可以先运行 `sudo ./install.sh --show-config` 检查参数，切换模式或调整参数时只传入需要覆盖的选项。安装器保留旧配置并构建新镜像，只重建必要组件；网络不变时复用。命名卷 `leigod-plugin-state` 不会因为正常重装或模式切换而删除。
+
+区分服务健康和加速接管状态：
+
+```bash
+docker exec leigod-plugin /usr/local/sbin/leigod-status --json --sample-seconds 5
+```
+
+未开启时正常结果为 `idle`；`capture_ready` 表示接管条件齐备，TUN 计数表示隧道有流量。特定游戏的节点转发仍需结合游戏 socket 和 `acc_PC.log`，不能仅根据 `offline` 或容器 healthy 下结论。完整状态定义和回归测试见 [OPTIMIZATIONS.md](OPTIMIZATIONS.md)。
 
 持久/非持久数据：
 
@@ -500,6 +513,6 @@ docker inspect leigod-plugin --format '{{.State.Health.Status}}'
 
 ### 游戏能启动但域名解析失败
 
-游戏只进入 network namespace，仍读取宿主 `/etc/resolv.conf`。宿主若只写 `127.0.0.53`，Wine 会向加速 netns 里的该地址发 UDP/53。入口会在 `lo` 上添加 `127.0.0.53/32`，并启动 `leigod-dns-stub` 把查询转到 `223.6.6.6` 与 `114.114.114.114`。不必改宿主 `resolv.conf`。
+游戏只进入 network namespace，仍读取宿主 `/etc/resolv.conf`。宿主若只写 `127.0.0.53`，Wine 会向加速 netns 里的该地址发 UDP/53。入口会在 `lo` 上添加 `127.0.0.53/32`，并启动 `leigod-dns-stub` 把查询转到 `223.6.6.6` 与 `114.114.114.114`。stub 校验回复来源、事务 ID 与问题字段，UDP 截断时回退 TCP，使用 4 个固定工作线程和最多 32 个排队请求。不必改宿主 `resolv.conf`。
 
 若解析仍失败，检查容器健康检查是否包含 `127.0.0.53:53`，以及上游 DNS 是否可从加速 netns 访问。

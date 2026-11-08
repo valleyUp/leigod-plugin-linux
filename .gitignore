@@ -3,6 +3,8 @@ acc-gw.router.*
 ipdatacloud_country.xdb
 
 # Build artifacts
+__pycache__/
+*.pyc
 bin/leigod-discover-proxy
 packages/*.deb
 packages/*.tar.gz

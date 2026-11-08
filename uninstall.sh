@@ -142,6 +142,29 @@ remove_managed_file() {
     return 1
 }
 
+policy_helper=/usr/local/libexec/leigod-direct-policy.py
+policy_unit=/etc/systemd/system/leigod-direct-policy.service
+if [ -e "$policy_helper" ] || [ -L "$policy_helper" ] ||
+   [ -e "$policy_unit" ] || [ -L "$policy_unit" ]; then
+    if [ "$manifest_available" -eq 1 ] &&
+       leigod_manifest_file_matches "$INSTALL_MANIFEST" "$policy_helper" &&
+       leigod_manifest_file_matches "$INSTALL_MANIFEST" "$policy_unit"; then
+        policy_subnet=$(awk '$1 == "ExecStop=/usr/local/libexec/leigod-direct-policy.py" && $2 == "--subnet" {print $3; exit}' "$policy_unit")
+        [ -n "$policy_subnet" ] || fail 'cannot read the verified direct policy subnet'
+        info 'removing the verified direct routing policy and its exact rules'
+        systemctl disable --now leigod-direct-policy.service ||
+            fail 'cannot stop the direct routing policy; its files were retained'
+        "$policy_helper" --subnet "$policy_subnet" --remove ||
+            fail 'cannot remove the direct policy rules; its files were retained'
+        remove_managed_file "$policy_unit" || true
+        remove_managed_file "$policy_helper" || true
+        systemctl daemon-reload
+    else
+        warn 'direct routing policy files cannot both be verified and were retained'
+        retained_managed_files=1
+    fi
+fi
+
 if [ "$manifest_available" -eq 1 ]; then
     remove_managed_file /usr/bin/leigod-game-run || true
 else

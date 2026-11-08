@@ -30,7 +30,8 @@ services:
       - --container
       - ${LEIGOD_BRIDGE_IPV4:-172.21.0.2}
     depends_on:
-      - accelerator
+      accelerator:
+        condition: service_healthy
     logging:
       driver: json-file
       options:
@@ -41,6 +42,8 @@ networks:
   leigod-bridge:
     name: leigod-plugin-bridge
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: leigodbr0
     ipam:
       config:
         - subnet: ${LEIGOD_BRIDGE_SUBNET:-172.21.0.0/16}
